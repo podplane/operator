@@ -7,8 +7,10 @@
 BINDIR := bin
 BINARY_NAME := podplane-operator
 MAIN_PKG := ./cmd/podplane-operator
+IMAGE_REPOSITORY ?= ghcr.io/podplane/operator
+IMAGE_TAG ?= latest
 
-.PHONY: help setup fmt lint precommit test build clean
+.PHONY: help setup fmt lint precommit test build image clean
 
 help: ## Show available targets
 	@echo "Usage: make <target>"
@@ -47,6 +49,9 @@ test: ## Run tests
 build: ## Build the podplane-operator binary
 	mkdir -p $(BINDIR)
 	go build -trimpath -o $(BINDIR)/$(BINARY_NAME) $(MAIN_PKG)
+
+image: ## Build container image
+	docker build -f images/podplane-operator/Containerfile -t $(IMAGE_REPOSITORY):$(IMAGE_TAG) .
 
 clean: ## Remove build artifacts
 	rm -rf $(BINDIR)
