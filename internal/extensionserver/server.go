@@ -99,7 +99,9 @@ func (s *Server) Run(ctx context.Context, opts Options) error {
 	if err := apiServer.InstallAPIGroup(&apiGroup); err != nil {
 		return err
 	}
-	_, _, err = apiServer.PrepareRun().NonBlockingRunWithContext(ctx, 10)
+	if _, _, err := apiServer.PrepareRun().NonBlockingRunWithContext(ctx, 10); err != nil {
+		return err
+	}
 	return nil
 }
 
