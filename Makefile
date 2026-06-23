@@ -9,8 +9,9 @@ BINARY_NAME := podplane-operator
 MAIN_PKG := ./cmd/podplane-operator
 IMAGE_REPOSITORY ?= ghcr.io/podplane/operator
 IMAGE_TAG ?= latest
+CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.18.0
 
-.PHONY: help setup fmt lint precommit test build image clean
+.PHONY: help setup fmt lint precommit test generate generate-crds generate-deepcopy build image clean
 
 help: ## Show available targets
 	@echo "Usage: make <target>"
@@ -45,6 +46,14 @@ precommit: ## Check formatting and run vet
 
 test: ## Run tests
 	go test ./...
+
+generate: generate-crds generate-deepcopy ## Generate CRDs and generated Go code
+
+generate-crds: ## Generate Kubernetes CRDs
+	$(CONTROLLER_GEN) crd:headerFile=config/boilerplate/crd.yaml.txt paths=./api/... output:crd:dir=config/crd/bases
+
+generate-deepcopy: ## Generate Kubernetes deepcopy code
+	$(CONTROLLER_GEN) object:headerFile=config/boilerplate/go.txt paths=./api/...
 
 build: ## Build the podplane-operator binary
 	mkdir -p $(BINDIR)
