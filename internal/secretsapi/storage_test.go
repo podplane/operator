@@ -35,7 +35,7 @@ func TestUpdateValidatesAllEntriesBeforeMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	storage := &KeyspaceStorage{ClusterID: "cluster", Prefix: "cluster", Keys: keys, Backends: registry}
+	storage := &KeyspaceStorage{ClusterID: "cluster", Keys: keys, Backends: registry}
 	ctx := request.WithNamespace(context.Background(), "namespace")
 	value := encryptForTest(t, keys.PublicKey(), AssociatedData(Algorithm, "cluster", "namespace", "provider.binding", "first"), []byte("value"))
 	obj := &SecretProviderKeyspace{

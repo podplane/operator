@@ -82,14 +82,14 @@ func ValidateProviderName(name string) error {
 	return nil
 }
 
-// ValidateClusterPrefix validates the path prefix for cluster secrets.
-func ValidateClusterPrefix(prefix string) error {
+// ValidateKeyPrefix validates a provider backend key prefix.
+func ValidateKeyPrefix(prefix string) error {
 	if len(prefix) == 0 || len(prefix) > 32 || strings.Contains(prefix, "--") || !dnsLabelRE.MatchString(prefix) {
-		return fmt.Errorf("invalid cluster secrets prefix %q", prefix)
+		return fmt.Errorf("invalid provider key prefix %q", prefix)
 	}
 	switch prefix {
 	case "local", "k8s", "oidc":
-		return fmt.Errorf("invalid cluster secrets prefix %q: reserved", prefix)
+		return fmt.Errorf("invalid provider key prefix %q: reserved", prefix)
 	}
 	return nil
 }
@@ -123,7 +123,7 @@ func NewKeyspace(prefix, namespace, resourceName string) (Keyspace, error) {
 	if err != nil {
 		return Keyspace{}, err
 	}
-	if err := ValidateClusterPrefix(prefix); err != nil {
+	if err := ValidateKeyPrefix(prefix); err != nil {
 		return Keyspace{}, err
 	}
 	if err := ValidateSegment("namespace", namespace); err != nil {

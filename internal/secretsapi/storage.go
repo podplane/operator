@@ -48,11 +48,11 @@ func (p *PublicKeyStorage) Get(_ context.Context, name string, _ *metav1.GetOpti
 
 // KeyspaceStorage serves named SecretProviderKeyspace resources from provider backends.
 type KeyspaceStorage struct {
-	ClusterID string
-	Prefix    string
-	Keys      *KeyRing
-	Backends  *secretsbackend.Registry
-	Kube      kubernetes.Interface
+	ClusterID   string
+	KeyPrefixes map[string]string
+	Keys        *KeyRing
+	Backends    *secretsbackend.Registry
+	Kube        kubernetes.Interface
 }
 
 // New returns an empty SecretProviderKeyspace object.
@@ -220,15 +220,32 @@ func (s *KeyspaceStorage) Delete(ctx context.Context, name string, deleteValidat
 
 // backend resolves the requested keyspace and its configured provider backend.
 func (s *KeyspaceStorage) backend(namespace, name string) (secretsbackend.Keyspace, secretsbackend.Backend, error) {
-	ks, err := secretsbackend.NewKeyspace(s.Prefix, namespace, name)
+	provider, binding, err := secretsbackend.ParseKeyspaceName(name)
 	if err != nil {
 		return secretsbackend.Keyspace{}, nil, apierrors.NewBadRequest(err.Error())
 	}
-	b, err := s.Backends.Backend(ks.ProviderName)
+	b, err := s.Backends.Backend(provider)
 	if err != nil {
 		return secretsbackend.Keyspace{}, nil, apierrors.NewNotFound(keyspaceResource(), name)
 	}
+	prefix := s.keyPrefix(provider)
+	if err := secretsbackend.ValidateKeyPrefix(prefix); err != nil {
+		return secretsbackend.Keyspace{}, nil, apierrors.NewBadRequest(err.Error())
+	}
+	if err := secretsbackend.ValidateSegment("namespace", namespace); err != nil {
+		return secretsbackend.Keyspace{}, nil, apierrors.NewBadRequest(err.Error())
+	}
+	ks := secretsbackend.Keyspace{ProviderName: provider, Namespace: namespace, BindingName: binding, Prefix: prefix}
 	return ks, b, nil
+}
+
+// keyPrefix returns the configured provider key prefix, defaulting to the
+// cluster ID for provider entries that omit it.
+func (s *KeyspaceStorage) keyPrefix(provider string) string {
+	if prefix := s.KeyPrefixes[provider]; prefix != "" {
+		return prefix
+	}
+	return s.ClusterID
 }
 
 // check performs a SubjectAccessReview for an operator-enforced custom verb.

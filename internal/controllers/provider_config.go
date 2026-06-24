@@ -9,6 +9,10 @@ type ProviderConfig struct {
 	Name string `json:"-"`    // Cluster-unique provider name from the providers map key.
 	Kind string `json:"kind"` // Upstream Secrets Store CSI provider kind: aws, gcp, vault, openbao, or memory.
 
+	// KeyPrefix partitions backend keys for this provider. Defaults to the
+	// cluster ID when omitted.
+	KeyPrefix string `json:"key_prefix,omitempty"`
+
 	// AWS options
 	ObjectType string `json:"object_type,omitempty"` // object type for secrets-store-csi-provider-aws.
 	// for ObjectType, "secretsmanager" is the default, "ssmparameter" is for AWS Parameter Store.

@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -40,20 +39,15 @@ func main() {
 // run starts the controller manager and aggregated API server.
 func run() error {
 	var cfgPath, addr, certFile, keyFile string
-	var rotation time.Duration
 	flag.StringVar(&cfgPath, "config", "/etc/podplane-operator/config.json", "operator JSON config")
-	flag.StringVar(&addr, "secure-bind-address", ":8443", "TLS address for APIService traffic")
+	flag.StringVar(&addr, "https-bind-address", ":8443", "HTTPS address for APIService traffic")
 	flag.StringVar(&certFile, "tls-cert-file", "/var/run/podplane/tls/tls.crt", "TLS certificate file")
 	flag.StringVar(&keyFile, "tls-private-key-file", "/var/run/podplane/tls/tls.key", "TLS private key file")
-	flag.DurationVar(&rotation, "key-rotation", operatorconfig.DefaultRotation(), "operator X25519 public key rotation interval")
 	flag.Parse()
 
 	ctx := ctrl.SetupSignalHandler()
 	cfg, err := operatorconfig.Load(cfgPath)
 	if err != nil {
-		return err
-	}
-	if err := secretsbackend.ValidateClusterPrefix(cfg.SecretsPrefix); err != nil {
 		return err
 	}
 
@@ -67,9 +61,17 @@ func run() error {
 	}
 
 	providerMap := map[string]controllers.ProviderConfig{}
+	keyPrefixes := map[string]string{}
 	backends := []secretsbackend.Backend{}
 	for name, p := range cfg.Providers {
+		if p.KeyPrefix == "" {
+			p.KeyPrefix = cfg.ClusterID
+		}
+		if err := secretsbackend.ValidateKeyPrefix(p.KeyPrefix); err != nil {
+			return err
+		}
 		providerMap[name] = p
+		keyPrefixes[name] = p.KeyPrefix
 		b, err := backend(ctx, name, p)
 		if err != nil {
 			return err
@@ -81,12 +83,16 @@ func run() error {
 		return err
 	}
 
-	reconciler := &controllers.SecretProviderBindingReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Renderer: controllers.Renderer{ClusterPrefix: cfg.SecretsPrefix, Providers: providerMap, AllowSyncToKubernetesSecrets: cfg.AllowSyncToKubernetesSecrets}}
+	reconciler := &controllers.SecretProviderBindingReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Renderer: controllers.Renderer{ClusterID: cfg.ClusterID, Providers: providerMap, AllowSyncToKubernetesSecrets: cfg.AllowSyncToKubernetesSecrets}}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return err
 	}
 
-	keys, err := secretsapi.NewKeyRing(rotation)
+	keyRotation, err := cfg.KeyRotationDuration()
+	if err != nil {
+		return err
+	}
+	keys, err := secretsapi.NewKeyRing(keyRotation)
 	if err != nil {
 		return err
 	}
@@ -97,7 +103,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	keyspaces := &secretsapi.KeyspaceStorage{ClusterID: cfg.ClusterID, Prefix: cfg.SecretsPrefix, Keys: keys, Backends: registry, Kube: kube}
+	keyspaces := &secretsapi.KeyspaceStorage{ClusterID: cfg.ClusterID, KeyPrefixes: keyPrefixes, Keys: keys, Backends: registry, Kube: kube}
 	publicKeys := &secretsapi.PublicKeyStorage{Keys: keys}
 	extensions := &extensionserver.Server{Kube: kube, Secrets: keyspaces, KeyStore: publicKeys}
 	if err := extensions.Run(ctx, extensionserver.Options{Addr: addr, CertFile: certFile, KeyFile: keyFile, RestConfig: restCfg}); err != nil {

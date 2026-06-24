@@ -16,9 +16,9 @@ import (
 
 // File is the top-level operator configuration file.
 type File struct {
-	ClusterID                    string                                `json:"clusterID"`
-	SecretsPrefix                string                                `json:"secretsPrefix,omitempty"`
-	AllowSyncToKubernetesSecrets bool                                  `json:"allowSyncToKubernetesSecrets,omitempty"`
+	ClusterID                    string                                `json:"cluster_id"`
+	KeyRotation                  string                                `json:"key_rotation,omitempty"`
+	AllowSyncToKubernetesSecrets bool                                  `json:"allow_sync_to_kubernetes_secrets,omitempty"`
 	Providers                    map[string]controllers.ProviderConfig `json:"providers"`
 }
 
@@ -32,8 +32,8 @@ func Load(path string) (File, error) {
 	if err := json.Unmarshal(b, &f); err != nil {
 		return File{}, err
 	}
-	if f.SecretsPrefix == "" {
-		f.SecretsPrefix = f.ClusterID
+	if _, err := f.KeyRotationDuration(); err != nil {
+		return File{}, err
 	}
 	names := make([]string, 0, len(f.Providers))
 	for name := range f.Providers {
@@ -56,3 +56,15 @@ func Load(path string) (File, error) {
 
 // DefaultRotation returns the default public-key rotation interval.
 func DefaultRotation() time.Duration { return 6 * time.Hour }
+
+// KeyRotationDuration returns the parsed public-key rotation interval.
+func (f File) KeyRotationDuration() (time.Duration, error) {
+	if f.KeyRotation == "" {
+		return DefaultRotation(), nil
+	}
+	d, err := time.ParseDuration(f.KeyRotation)
+	if err != nil {
+		return 0, fmt.Errorf("parse key_rotation: %w", err)
+	}
+	return d, nil
+}

@@ -28,7 +28,7 @@ var SecretProviderClassGVK = schema.GroupVersionKind{Group: "secrets-store.csi.x
 
 // Renderer builds SecretProviderClass objects from SecretProviderBinding resources.
 type Renderer struct {
-	ClusterPrefix                string
+	ClusterID                    string
 	Providers                    map[string]ProviderConfig
 	AllowSyncToKubernetesSecrets bool
 }
@@ -39,7 +39,7 @@ func (r Renderer) Render(binding *secretsv1beta1.SecretProviderBinding) (*unstru
 	if !ok {
 		return nil, secretsv1beta1.SecretProviderBindingStatus{}, fmt.Errorf("unknown provider %q", binding.Spec.ProviderName)
 	}
-	ks := secretsbackend.Keyspace{ProviderName: provider.Name, Namespace: binding.Namespace, BindingName: binding.Name, Prefix: r.ClusterPrefix}
+	ks := secretsbackend.Keyspace{ProviderName: provider.Name, Namespace: binding.Namespace, BindingName: binding.Name, Prefix: providerKeyPrefix(r.ClusterID, provider)}
 	items := make([]secretsv1beta1.SecretProviderBindingItemStatus, 0, len(binding.Spec.Items))
 	for _, item := range binding.Spec.Items {
 		if err := secretsbackend.ValidateSegment("key", item.Key); err != nil {
@@ -70,6 +70,15 @@ func (r Renderer) Render(binding *secretsv1beta1.SecretProviderBinding) (*unstru
 	obj.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: secretsv1beta1.GroupVersion.String(), Kind: "SecretProviderBinding", Name: binding.Name, UID: binding.UID, Controller: ptr(true), BlockOwnerDeletion: ptr(true)}})
 	status := secretsv1beta1.SecretProviderBindingStatus{Provider: secretsv1beta1.SecretProviderBindingProviderStatus{Name: provider.Name, Kind: provider.Kind}, SecretProviderClass: secretsv1beta1.SecretProviderClassStatus{Name: binding.Name}, Items: items}
 	return obj, status, nil
+}
+
+// providerKeyPrefix returns the provider's configured backend key prefix,
+// defaulting to the cluster ID for providers that omit it.
+func providerKeyPrefix(clusterID string, provider ProviderConfig) string {
+	if provider.KeyPrefix != "" {
+		return provider.KeyPrefix
+	}
+	return clusterID
 }
 
 // parameters renders provider-specific SecretProviderClass parameters.

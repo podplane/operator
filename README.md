@@ -9,7 +9,7 @@ The Podplane Operator provides features which improve the PaaS developer experie
 Podplane Secrets:
 
 - Adds a convention-based DX on top of the [secrets-store-csi-driver](https://secrets-store-csi-driver.sigs.k8s.io/).
-    - Read path: enables `podplane secrets` CLI functionality.
+    - Read path: enables `podplane secret` CLI functionality.
     - Write path: simplifies template configuration with a "binding" CRD.
 - A `SecretProviderBinding` CRD and controller that renders/manages Secrets Store CSI `SecretProviderClass` objects.
 - An aggregated API extension to create, update, delete, restore, and destroy upstream provider secrets.
@@ -19,18 +19,20 @@ Podplane Secrets:
 
 The operator is configured with a JSON file passed to `podplane-operator --config`.
 The config declares the Podplane cluster identity and the named secrets
-providers the operator can use. The `providers` object intentionally matches
-the Podplane cluster config `cluster.secrets.providers` shape: provider names
-are map keys, and provider entries contain non-secret provider metadata.
+providers the operator can use. The `providers` object mirrors the Podplane
+cluster config `cluster.secrets.providers` model: provider names are map keys,
+and provider entries contain non-secret provider metadata.
 
 Example:
 
 ```json
 {
-  "clusterID": "dev-cluster",
+  "cluster_id": "dev-cluster",
+  "key_rotation": "6h",
   "providers": {
     "openbao-local": {
       "kind": "openbao",
+      "key_prefix": "shared-secrets",
       "address": "https://podplane-local.example/vault/dev-cluster/v1",
       "mount_path": "secret"
     },
@@ -43,22 +45,34 @@ Example:
 }
 ```
 
-`clusterID` identifies the Podplane cluster. The backend path prefix defaults to
-`clusterID`. Each provider has safe fields such as `kind`, `object_type`,
+`cluster_id` identifies the Podplane cluster. The backend path prefix defaults to
+`cluster_id`. Each provider has safe fields such as `kind`, `object_type`,
 `region`, `project_id`, `location`, `address`, or `mount_path`. Secret material
 must not be placed inline. When Vault/OpenBao needs a token, mount it at
 `/var/run/podplane/providers/<provider-name>/token`.
 
 `SecretProviderBinding.spec.syncToKubernetesSecrets` is disabled by default
 because it causes provider secret values to be persisted into Kubernetes Secret
-objects. To allow it, set `allowSyncToKubernetesSecrets: true` in the operator
+objects. To allow it, set `allow_sync_to_kubernetes_secrets: true` in the operator
 config and annotate each permitted namespace with
 `secrets.podplane.dev/allow-sync-to-kubernetes-secrets: "true"`.
+
+The operator Helm chart also installs a default Kubernetes
+`ValidatingAdmissionPolicy` for Pods that use Secrets Store CSI volumes. Those
+Pods must set an explicit, non-empty `spec.serviceAccountName`, and every mounted
+Secrets Store CSI `secretProviderClass` must equal that service account name.
+Pods that omit `serviceAccountName` are denied rather than being treated as the
+Kubernetes `default` service account for this policy.
 
 ## Helm Chart
 
 The operator Helm chart lives in the Podplane components repository as the
-[`platform-podplane` chart](https://github.com/podplane/components/tree/main/charts/platform-podplane).
+[`podplane-operator` chart](https://github.com/podplane/components/tree/main/charts/podplane-operator).
+
+The components repository also ships `podplane-operator-crds`, which vendors the
+generated `SecretProviderBinding` CRD from this repository. Regenerate CRDs here
+with `make generate-crds` and copy the generated CRD into the components chart
+when the API changes.
 
 ## Learn More
 
