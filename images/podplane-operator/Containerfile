@@ -2,26 +2,28 @@
 # Copyright The Podplane Authors
 # SPDX-License-Identifier: Apache-2.0
 
+# Use a native builder to cross-compile to target platform
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 WORKDIR /workspace
 
-RUN apk add --no-cache ca-certificates git
-
+# Create an image layer of downloaded dependencies
 COPY go.mod go.sum ./
 RUN go mod download
 
+# Copy source code and build the binary
 COPY . .
-
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" \
 	go build -trimpath -ldflags="-s -w" -o /out/podplane-operator ./cmd/podplane-operator
 
+# Runtime stage
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
 
+# Copy the builder artifacts
 COPY --from=builder /out/podplane-operator /usr/bin/podplane-operator
 
+# Run as distroles nonroot user
 USER nonroot:nonroot
-
 ENTRYPOINT ["/usr/bin/podplane-operator"]
