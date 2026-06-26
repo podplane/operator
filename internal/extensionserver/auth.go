@@ -10,7 +10,6 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
 	"k8s.io/apiserver/pkg/authentication/authenticatorfactory"
@@ -23,13 +22,20 @@ import (
 
 // requestHeaderController keeps requestheader authentication config current.
 type requestHeaderController struct {
-	*dynamiccertificates.ConfigMapCAController
+	ca       dynamiccertificates.CAContentProvider
+	caRunner dynamiccertificates.ControllerRunner
 	*headerrequest.RequestHeaderAuthRequestController
+}
+
+// caContentProvider hides ControllerRunner so generic-apiserver does not start
+// the requestheader CA controller a second time.
+type caContentProvider struct {
+	dynamiccertificates.CAContentProvider
 }
 
 // newRequestHeaderController loads kube-apiserver aggregation proxy settings.
 func newRequestHeaderController(kube kubernetes.Interface) (*requestHeaderController, error) {
-	ca, err := dynamiccertificates.NewDynamicCAFromConfigMapController("request-header", metav1.NamespaceSystem, "extension-apiserver-authentication", "requestheader-client-ca-file", kube)
+	dynamicCA, err := dynamiccertificates.NewDynamicCAFromConfigMapController("request-header", metav1.NamespaceSystem, "extension-apiserver-authentication", "requestheader-client-ca-file", kube)
 	if err != nil {
 		return nil, fmt.Errorf("create requestheader CA controller: %w", err)
 	}
@@ -43,15 +49,20 @@ func newRequestHeaderController(kube kubernetes.Interface) (*requestHeaderContro
 		"requestheader-extra-headers-prefix",
 		"requestheader-allowed-names",
 	)
-	return &requestHeaderController{ConfigMapCAController: ca, RequestHeaderAuthRequestController: headers}, nil
+	return &requestHeaderController{ca: caContentProvider{dynamicCA}, caRunner: dynamicCA, RequestHeaderAuthRequestController: headers}, nil
 }
 
 // RunOnce loads requestheader config and fails closed if required data is absent.
 func (c *requestHeaderController) RunOnce(ctx context.Context) error {
-	if err := utilerrors.NewAggregate([]error{c.ConfigMapCAController.RunOnce(ctx), c.RequestHeaderAuthRequestController.RunOnce(ctx)}); err != nil {
+	if err := c.RequestHeaderAuthRequestController.RunOnce(ctx); err != nil {
 		return err
 	}
-	if len(c.CurrentCABundleContent()) == 0 {
+	if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 10*time.Second, true, func(ctx context.Context) (bool, error) {
+		return len(c.ca.CurrentCABundleContent()) > 0, nil
+	}); err != nil {
+		return fmt.Errorf("load requestheader client CA: %w", err)
+	}
+	if len(c.ca.CurrentCABundleContent()) == 0 {
 		return fmt.Errorf("requestheader client CA is empty")
 	}
 	if len(c.UsernameHeaders()) == 0 {
@@ -62,7 +73,6 @@ func (c *requestHeaderController) RunOnce(ctx context.Context) error {
 
 // Run keeps requestheader config current until ctx is canceled.
 func (c *requestHeaderController) Run(ctx context.Context, workers int) {
-	go c.ConfigMapCAController.Run(ctx, workers)
 	go c.RequestHeaderAuthRequestController.Run(ctx, workers)
 	<-ctx.Done()
 }
@@ -76,6 +86,7 @@ func delegatedAuth(ctx context.Context, kube kubernetes.Interface) (*requestHead
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	go rh.caRunner.Run(ctx, 1)
 	if err := rh.RunOnce(ctx); err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -84,7 +95,7 @@ func delegatedAuth(ctx context.Context, kube kubernetes.Interface) (*requestHead
 		UIDHeaders:          headerrequest.StringSliceProviderFunc(rh.UIDHeaders),
 		GroupHeaders:        headerrequest.StringSliceProviderFunc(rh.GroupHeaders),
 		ExtraHeaderPrefixes: headerrequest.StringSliceProviderFunc(rh.ExtraHeaderPrefixes),
-		CAContentProvider:   rh,
+		CAContentProvider:   rh.ca,
 		AllowedClientNames:  headerrequest.StringSliceProviderFunc(rh.AllowedClientNames),
 	}
 	authn, _, err := authenticatorfactory.DelegatingAuthenticatorConfig{RequestHeaderConfig: rhConfig}.New()

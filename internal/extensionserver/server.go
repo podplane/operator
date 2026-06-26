@@ -68,7 +68,7 @@ func (s *Server) Run(ctx context.Context, opts Options) error {
 	}
 
 	config := genericapiserver.NewConfig(codecs)
-	config.SecureServing = &genericapiserver.SecureServingInfo{Listener: listener, Cert: cert, ClientCA: rh, MinTLSVersion: tls.VersionTLS12}
+	config.SecureServing = &genericapiserver.SecureServingInfo{Listener: listener, Cert: cert, ClientCA: rh.ca, MinTLSVersion: tls.VersionTLS12}
 	config.Authentication.Authenticator = authn
 	config.Authentication.RequestHeaderConfig = rhConfig
 	config.Authorization.Authorizer = authz
