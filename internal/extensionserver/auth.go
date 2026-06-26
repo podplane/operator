@@ -11,14 +11,21 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	apiserverconfig "k8s.io/apiserver/pkg/apis/apiserver"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
 	"k8s.io/apiserver/pkg/authentication/authenticatorfactory"
+	"k8s.io/apiserver/pkg/authentication/request/anonymous"
 	"k8s.io/apiserver/pkg/authentication/request/headerrequest"
+	authnunion "k8s.io/apiserver/pkg/authentication/request/union"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/apiserver/pkg/authorization/authorizerfactory"
+	"k8s.io/apiserver/pkg/authorization/path"
+	authzunion "k8s.io/apiserver/pkg/authorization/union"
 	"k8s.io/apiserver/pkg/server/dynamiccertificates"
 	kubernetes "k8s.io/client-go/kubernetes"
 )
+
+var healthCheckPaths = []string{"/healthz", "/livez", "/readyz"}
 
 // requestHeaderController keeps requestheader authentication config current.
 type requestHeaderController struct {
@@ -102,10 +109,20 @@ func delegatedAuth(ctx context.Context, kube kubernetes.Interface) (*requestHead
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	var anonymousConditions []apiserverconfig.AnonymousAuthCondition
+	for _, path := range healthCheckPaths {
+		anonymousConditions = append(anonymousConditions, apiserverconfig.AnonymousAuthCondition{Path: path})
+	}
+	authn = authnunion.New(authn, anonymous.NewAuthenticator(anonymousConditions))
+	pathAuthorizer, err := path.NewAuthorizer(healthCheckPaths)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
 	backoff := wait.Backoff{Duration: 500 * time.Millisecond, Factor: 1.5, Jitter: 0.2, Steps: 5}
 	authz, err := authorizerfactory.DelegatingAuthorizerConfig{SubjectAccessReviewClient: kube.AuthorizationV1(), AllowCacheTTL: 10 * time.Second, DenyCacheTTL: 10 * time.Second, WebhookRetryBackoff: &backoff}.New()
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	authz = authzunion.New(pathAuthorizer, authz)
 	return rh, authn, authz, rhConfig, nil
 }
