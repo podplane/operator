@@ -27,34 +27,62 @@ Example:
 
 ```json
 {
-  "cluster_id": "dev-cluster",
-  "key_rotation": "6h",
-  "providers": {
-    "openbao-local": {
-      "kind": "openbao",
-      "key_prefix": "shared-secrets",
-      "address": "https://podplane-local.example/vault/dev-cluster/v1",
-      "mount_path": "secret"
-    },
-    "aws-secrets-manager": {
-      "kind": "aws",
-      "object_type": "secretsmanager",
-      "region": "us-east-1"
+  "cluster": {
+    "id": "dev-cluster",
+    "oidc": {
+      "issuer_url": "https://oidc.example.com/dev-cluster",
+      "client_id": "dev-cluster"
+    }
+  },
+  "secrets": {
+    "allow_sync_to_kubernetes_secrets": false,
+    "key_rotation": "6h",
+    "providers": {
+      "openbao-local": {
+        "kind": "openbao",
+        "key_prefix": "shared-secrets",
+        "address": "https://podplane-local.example/vault/dev-cluster/v1",
+        "mount_path": "secret"
+      },
+      "aws-secrets-manager": {
+        "kind": "aws",
+        "object_type": "secretsmanager",
+        "region": "us-east-1"
+      }
+    }
+  },
+  "registry": {
+    "auth": {
+      "enabled": true
     }
   }
 }
 ```
 
-`cluster_id` identifies the Podplane cluster. The backend path prefix defaults to
-`cluster_id`. Each provider has safe fields such as `kind`, `object_type`,
-`region`, `project_id`, `location`, `address`, or `mount_path`. Secret material
-must not be placed inline. When Vault/OpenBao needs a token, mount it at
-`/var/run/podplane/providers/<provider-name>/token`.
+`cluster.id` identifies the Podplane cluster. The backend path prefix defaults
+to `cluster.id`. `cluster.oidc` is shared module identity configuration; the
+registry token service validates Docker refresh-token exchanges against that
+issuer and uses `cluster.oidc.client_id` as the audience, defaulting it to
+`cluster.id` when omitted. Each secrets provider has safe fields such as `kind`,
+`object_type`, `region`, `project_id`, `location`, `address`, or `mount_path`.
+Secret material must not be placed inline. When Vault/OpenBao needs a token,
+mount it at `/var/run/podplane/providers/<provider-name>/token`.
+
+Registry auth is HTTPS-only and is intended for registry ingress `/token`
+routing. Configure its bind address and serving certificate with
+`--registry-auth-bind-address`, `--registry-auth-tls-cert-file`, and
+`--registry-auth-tls-private-key-file`. The Helm chart should issue and mount a
+service DNS certificate and configure Traefik/Gateway backend TLS trust in the
+same style as Podplane web template workloads.
+
+The aggregated API endpoint uses matching serving flags:
+`--aggregated-api-bind-address`, `--aggregated-api-tls-cert-file`, and
+`--aggregated-api-tls-private-key-file`.
 
 `SecretProviderBinding.spec.syncToKubernetesSecrets` is disabled by default
 because it causes provider secret values to be persisted into Kubernetes Secret
 objects. To allow it, set `allow_sync_to_kubernetes_secrets: true` in the operator
-config and annotate each permitted namespace with
+config under `secrets` and annotate each permitted namespace with
 `secrets.podplane.dev/allow-sync-to-kubernetes-secrets: "true"`.
 
 The operator Helm chart also installs a default Kubernetes
