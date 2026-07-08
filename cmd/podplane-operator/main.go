@@ -6,13 +6,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -127,17 +124,9 @@ func run() error {
 func backend(ctx context.Context, name string, p controllers.ProviderConfig) (secretsbackend.Backend, error) {
 	switch p.Kind {
 	case "openbao":
-		token, err := providerToken(name)
-		if err != nil {
-			return nil, err
-		}
-		return secretsbackend.NewVaultBackend(secretsbackend.VaultOptions{Name: name, Kind: "openbao", Address: p.Address, Token: token, Mount: p.MountPath, CACert: p.CACert})
+		return secretsbackend.NewVaultBackend(secretsbackend.VaultOptions{Name: name, Kind: "openbao", Address: p.Address, Mount: p.MountPath, CACert: p.CACert, AuthPath: p.AuthPath, OperatorRole: p.OperatorRole})
 	case "vault":
-		token, err := providerToken(name)
-		if err != nil {
-			return nil, err
-		}
-		return secretsbackend.NewVaultBackend(secretsbackend.VaultOptions{Name: name, Kind: "vault", Address: p.Address, Token: token, Mount: p.MountPath, CACert: p.CACert})
+		return secretsbackend.NewVaultBackend(secretsbackend.VaultOptions{Name: name, Kind: "vault", Address: p.Address, Mount: p.MountPath, CACert: p.CACert, AuthPath: p.AuthPath, OperatorRole: p.OperatorRole})
 	case "aws":
 		if p.ObjectType == "ssmparameter" {
 			return secretsbackend.NewAWSParameterStoreBackend(ctx, name, p.Region)
@@ -150,16 +139,4 @@ func backend(ctx context.Context, name string, p controllers.ProviderConfig) (se
 	default:
 		return nil, fmt.Errorf("unsupported provider kind %q", p.Kind)
 	}
-}
-
-// providerToken reads the convention-based token file for a provider when it exists.
-func providerToken(name string) (string, error) {
-	b, err := os.ReadFile(filepath.Join("/var/run/podplane/providers", name, "token"))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(b)), nil
 }

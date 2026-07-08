@@ -21,10 +21,15 @@ import (
 	"time"
 )
 
+var serviceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
 // VaultBackend stores keys in Vault or OpenBao KV-v2.
 type VaultBackend struct {
-	name, kind, address, token, mount string
-	client                            *http.Client
+	name, kind, address, mount, authPath, operatorRole string
+	client                                             *http.Client
+	mu                                                 sync.Mutex
+	loginToken                                         string
+	loginTokenExpires                                  time.Time
 }
 
 type vaultHTTPError struct {
@@ -41,7 +46,7 @@ type vaultMetadata struct {
 }
 
 // VaultOptions configures a VaultBackend.
-type VaultOptions struct{ Name, Kind, Address, Token, Mount, CACert string }
+type VaultOptions struct{ Name, Kind, Address, Mount, CACert, AuthPath, OperatorRole string }
 
 // NewVaultBackend creates a Vault or OpenBao backend.
 func NewVaultBackend(o VaultOptions) (*VaultBackend, error) {
@@ -53,11 +58,19 @@ func NewVaultBackend(o VaultOptions) (*VaultBackend, error) {
 	if mount == "" {
 		mount = "secret"
 	}
+	authPath := strings.Trim(o.AuthPath, "/")
+	if authPath == "" {
+		authPath = "auth/kubernetes"
+	}
+	operatorRole := o.OperatorRole
+	if operatorRole == "" {
+		operatorRole = o.Name
+	}
 	client, err := vaultHTTPClient(o.CACert)
 	if err != nil {
 		return nil, err
 	}
-	return &VaultBackend{name: o.Name, kind: kind, address: strings.TrimRight(o.Address, "/"), token: o.Token, mount: mount, client: client}, nil
+	return &VaultBackend{name: o.Name, kind: kind, address: strings.TrimRight(o.Address, "/"), mount: mount, authPath: authPath, operatorRole: operatorRole, client: client}, nil
 }
 
 // ProviderName returns the configured provider name.
@@ -82,6 +95,15 @@ func (v *VaultBackend) metadataPrefix(ks Keyspace) string {
 
 // request sends one Vault or OpenBao API request.
 func (v *VaultBackend) request(ctx context.Context, method, apiPath string, body any) (*http.Response, error) {
+	token, err := v.requestToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return v.rawRequest(ctx, method, apiPath, token, body)
+}
+
+// rawRequest sends one Vault or OpenBao API request with an explicit token.
+func (v *VaultBackend) rawRequest(ctx context.Context, method, apiPath, token string, body any) (*http.Response, error) {
 	var r io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -94,8 +116,8 @@ func (v *VaultBackend) request(ctx context.Context, method, apiPath string, body
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if v.token != "" {
-		req.Header.Set("X-Vault-Token", v.token)
+	if token != "" {
+		req.Header.Set("X-Vault-Token", token)
 	}
 	resp, err := v.client.Do(req)
 	if err != nil {
@@ -110,6 +132,49 @@ func (v *VaultBackend) request(ctx context.Context, method, apiPath string, body
 		return nil, vaultHTTPError{method: method, path: apiPath, status: resp.Status, body: string(b)}
 	}
 	return resp, nil
+}
+
+// requestToken logs in with the operator pod's Kubernetes service account token
+// and returns a cached Vault/OpenBao client token.
+func (v *VaultBackend) requestToken(ctx context.Context) (string, error) {
+	v.mu.Lock()
+	if v.loginToken != "" && time.Until(v.loginTokenExpires) > time.Minute {
+		token := v.loginToken
+		v.mu.Unlock()
+		return token, nil
+	}
+	v.mu.Unlock()
+	jwt, err := os.ReadFile(serviceAccountTokenPath)
+	if err != nil {
+		return "", fmt.Errorf("read service account token for Vault/OpenBao login: %w", err)
+	}
+	body := map[string]string{"role": v.operatorRole, "jwt": strings.TrimSpace(string(jwt))}
+	resp, err := v.rawRequest(ctx, http.MethodPost, v.authPath+"/login", "", body)
+	if err != nil {
+		return "", fmt.Errorf("Vault/OpenBao Kubernetes login: %w", err)
+	}
+	defer resp.Body.Close()
+	var raw struct {
+		Auth struct {
+			ClientToken   string `json:"client_token"`
+			LeaseDuration int    `json:"lease_duration"`
+		} `json:"auth"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return "", fmt.Errorf("decode Vault/OpenBao login response: %w", err)
+	}
+	if raw.Auth.ClientToken == "" {
+		return "", fmt.Errorf("Vault/OpenBao login response did not include client_token")
+	}
+	expires := time.Now().Add(time.Hour)
+	if raw.Auth.LeaseDuration > 0 {
+		expires = time.Now().Add(time.Duration(raw.Auth.LeaseDuration) * time.Second)
+	}
+	v.mu.Lock()
+	v.loginToken = raw.Auth.ClientToken
+	v.loginTokenExpires = expires
+	v.mu.Unlock()
+	return raw.Auth.ClientToken, nil
 }
 
 // vaultHTTPClient returns an HTTP client that trusts an optional PEM CA bundle.

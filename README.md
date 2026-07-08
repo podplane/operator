@@ -42,7 +42,9 @@ Example:
         "kind": "openbao",
         "key_prefix": "shared-secrets",
         "address": "https://podplane-local.example/vault/dev-cluster/v1",
-        "mount_path": "secret"
+        "mount_path": "secret",
+        "auth_path": "auth/kubernetes",
+        "operator_role": "podplane-operator"
       },
       "aws-secrets-manager": {
         "kind": "aws",
@@ -64,9 +66,15 @@ to `cluster.id`. `cluster.oidc` is shared module identity configuration; the
 registry token service validates Docker refresh-token exchanges against that
 issuer and uses `cluster.oidc.client_id` as the audience, defaulting it to
 `cluster.id` when omitted. Each secrets provider has safe fields such as `kind`,
-`object_type`, `region`, `project_id`, `location`, `address`, or `mount_path`.
-Secret material must not be placed inline. When Vault/OpenBao needs a token,
-mount it at `/var/run/podplane/providers/<provider-name>/token`.
+`object_type`, `region`, `project_id`, `location`, `address`, `mount_path`,
+`ca_cert`, `auth_path`, or `operator_role`. Secret material must not be placed
+inline.
+
+Vault/OpenBao providers authenticate with Kubernetes/JWT auth. The operator uses
+its own pod service account token, logs in at `auth_path` (default
+`auth/kubernetes`), and requests `operator_role` (default provider name). Workload
+CSI mounts authenticate separately as the workload pod service account using the
+generated `SecretProviderClass` `roleName`.
 
 Registry auth is HTTPS-only and is intended for registry ingress `/token`
 routing. Configure its bind address and serving certificate with

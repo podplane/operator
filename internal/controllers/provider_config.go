@@ -23,7 +23,9 @@ type ProviderConfig struct {
 	Location  string `json:"location,omitempty"`   // Optional GCP regional Secret Manager location.
 
 	// Vault/OpenBao options
-	Address   string `json:"address,omitempty"`    // Vault/OpenBao server address rendered into the SecretProviderClass.
-	MountPath string `json:"mount_path,omitempty"` // Vault/OpenBao KV-v2 mount path. Defaults to secret.
-	CACert    string `json:"ca_cert,omitempty"`    // Optional PEM CA bundle for the Vault/OpenBao endpoint.
+	Address      string `json:"address,omitempty"`       // Vault/OpenBao server address rendered into the SecretProviderClass.
+	MountPath    string `json:"mount_path,omitempty"`    // Vault/OpenBao KV-v2 mount path. Defaults to secret.
+	CACert       string `json:"ca_cert,omitempty"`       // Optional PEM CA bundle for the Vault/OpenBao endpoint.
+	AuthPath     string `json:"auth_path,omitempty"`     // Vault/OpenBao Kubernetes auth mount path. Defaults to auth/kubernetes.
+	OperatorRole string `json:"operator_role,omitempty"` // Vault/OpenBao role used by the operator service account. Defaults to provider name.
 }
