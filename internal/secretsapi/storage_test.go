@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/hkdf"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	request "k8s.io/apiserver/pkg/endpoints/request"
@@ -55,6 +57,33 @@ func TestUpdateValidatesAllEntriesBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestUpdateUsesExistingVirtualKeyspaceObject(t *testing.T) {
+	keys, err := NewKeyRing(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &recordingBackend{name: "provider"}
+	registry, err := secretsbackend.NewRegistry(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage := &KeyspaceStorage{ClusterID: "cluster", Keys: keys, Backends: registry}
+	ctx := request.WithNamespace(context.Background(), "namespace")
+	value := encryptForTest(t, keys.PublicKey(), AssociatedData(Algorithm, "cluster", "namespace", "provider.binding", "first"), []byte("value"))
+	obj := &SecretProviderKeyspace{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "namespace", Name: "provider.binding"},
+		Spec:       SecretProviderKeyspaceSpec{Entries: []SecretProviderKeyspaceEntry{{Key: "first", Operation: "create", EncryptedValue: &value}}},
+	}
+
+	_, _, err = storage.Update(ctx, "provider.binding", requireExistingObjectInfo{obj: obj}, nil, func(context.Context, runtime.Object, runtime.Object) error { return nil }, false, &metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("update virtual keyspace: %v", err)
+	}
+	if backend.creates != 1 {
+		t.Fatalf("backend Create calls = %d, want 1", backend.creates)
+	}
+}
+
 type updatedObjectInfo struct{ obj runtime.Object }
 
 func (u updatedObjectInfo) Preconditions() *metav1.Preconditions { return nil }
@@ -63,6 +92,22 @@ func (u updatedObjectInfo) UpdatedObject(context.Context, runtime.Object) (runti
 }
 
 var _ rest.UpdatedObjectInfo = updatedObjectInfo{}
+
+type requireExistingObjectInfo struct{ obj runtime.Object }
+
+func (r requireExistingObjectInfo) Preconditions() *metav1.Preconditions { return nil }
+func (r requireExistingObjectInfo) UpdatedObject(_ context.Context, old runtime.Object) (runtime.Object, error) {
+	accessor, err := meta.Accessor(old)
+	if err != nil {
+		return nil, err
+	}
+	if accessor.GetUID() == "" {
+		return nil, apierrors.NewNotFound(keyspaceResource(), accessor.GetName())
+	}
+	return r.obj, nil
+}
+
+var _ rest.UpdatedObjectInfo = requireExistingObjectInfo{}
 
 type recordingBackend struct {
 	name    string

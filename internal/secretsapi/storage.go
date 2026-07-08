@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	request "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
@@ -94,7 +95,7 @@ func (s *KeyspaceStorage) Update(ctx context.Context, name string, objInfo rest.
 	if err != nil {
 		return nil, false, err
 	}
-	oldObj := &SecretProviderKeyspace{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}
+	oldObj := virtualKeyspaceObject(namespace, name)
 	newObj, err := objInfo.UpdatedObject(ctx, oldObj)
 	if err != nil {
 		return nil, false, err
@@ -169,6 +170,20 @@ func (s *KeyspaceStorage) Update(ctx context.Context, name string, objInfo rest.
 	return s.response(namespace, name, ks.ProviderName, entries), false, nil
 }
 
+// virtualKeyspaceObject returns the synthetic old object for named PUT
+// requests. SecretProviderKeyspaces are virtual backend keyspaces, but
+// Kubernetes update handlers use a non-empty UID to distinguish update from
+// create-on-update. We intentionally present the named virtual keyspace as an
+// existing object so callers only need named update permission, matching the
+// API's resourceNames-based RBAC model.
+func virtualKeyspaceObject(namespace, name string) *SecretProviderKeyspace {
+	return &SecretProviderKeyspace{ObjectMeta: metav1.ObjectMeta{
+		Namespace: namespace,
+		Name:      name,
+		UID:       types.UID("podplane-secrets-api/" + namespace + "/" + name),
+	}}
+}
+
 type keyspaceOperation struct {
 	entry SecretProviderKeyspaceEntry
 	value []byte
@@ -184,7 +199,7 @@ func (s *KeyspaceStorage) Delete(ctx context.Context, name string, deleteValidat
 	if err != nil {
 		return nil, false, err
 	}
-	if err := deleteValidation(ctx, &SecretProviderKeyspace{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}); err != nil {
+	if err := deleteValidation(ctx, virtualKeyspaceObject(namespace, name)); err != nil {
 		return nil, false, err
 	}
 	q := deleteQueryFrom(ctx)
