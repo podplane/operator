@@ -131,13 +131,13 @@ func backend(ctx context.Context, name string, p controllers.ProviderConfig) (se
 		if err != nil {
 			return nil, err
 		}
-		return secretsbackend.NewVaultBackend(secretsbackend.VaultOptions{Name: name, Kind: "openbao", Address: p.Address, Token: token, Mount: p.MountPath}), nil
+		return secretsbackend.NewVaultBackend(secretsbackend.VaultOptions{Name: name, Kind: "openbao", Address: p.Address, Token: token, Mount: p.MountPath, CACert: p.CACert})
 	case "vault":
 		token, err := providerToken(name)
 		if err != nil {
 			return nil, err
 		}
-		return secretsbackend.NewVaultBackend(secretsbackend.VaultOptions{Name: name, Kind: "vault", Address: p.Address, Token: token, Mount: p.MountPath}), nil
+		return secretsbackend.NewVaultBackend(secretsbackend.VaultOptions{Name: name, Kind: "vault", Address: p.Address, Token: token, Mount: p.MountPath, CACert: p.CACert})
 	case "aws":
 		if p.ObjectType == "ssmparameter" {
 			return secretsbackend.NewAWSParameterStoreBackend(ctx, name, p.Region)

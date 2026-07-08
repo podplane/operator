@@ -7,13 +7,17 @@ package secretsbackend
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,10 +41,10 @@ type vaultMetadata struct {
 }
 
 // VaultOptions configures a VaultBackend.
-type VaultOptions struct{ Name, Kind, Address, Token, Mount string }
+type VaultOptions struct{ Name, Kind, Address, Token, Mount, CACert string }
 
 // NewVaultBackend creates a Vault or OpenBao backend.
-func NewVaultBackend(o VaultOptions) *VaultBackend {
+func NewVaultBackend(o VaultOptions) (*VaultBackend, error) {
 	kind := o.Kind
 	if kind == "" {
 		kind = "vault"
@@ -49,7 +53,11 @@ func NewVaultBackend(o VaultOptions) *VaultBackend {
 	if mount == "" {
 		mount = "secret"
 	}
-	return &VaultBackend{name: o.Name, kind: kind, address: strings.TrimRight(o.Address, "/"), token: o.Token, mount: mount, client: &http.Client{Timeout: 30 * time.Second}}
+	client, err := vaultHTTPClient(o.CACert)
+	if err != nil {
+		return nil, err
+	}
+	return &VaultBackend{name: o.Name, kind: kind, address: strings.TrimRight(o.Address, "/"), token: o.Token, mount: mount, client: client}, nil
 }
 
 // ProviderName returns the configured provider name.
@@ -102,6 +110,22 @@ func (v *VaultBackend) request(ctx context.Context, method, apiPath string, body
 		return nil, vaultHTTPError{method: method, path: apiPath, status: resp.Status, body: string(b)}
 	}
 	return resp, nil
+}
+
+// vaultHTTPClient returns an HTTP client that trusts an optional PEM CA bundle.
+func vaultHTTPClient(caCert string) (*http.Client, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if strings.TrimSpace(caCert) != "" {
+		pool, err := x509.SystemCertPool()
+		if err != nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM([]byte(caCert)) {
+			return nil, fmt.Errorf("parse Vault/OpenBao ca_cert")
+		}
+		transport.TLSClientConfig = &tls.Config{RootCAs: pool}
+	}
+	return &http.Client{Timeout: 30 * time.Second, Transport: transport}, nil
 }
 
 // Create creates a new KV-v2 value.

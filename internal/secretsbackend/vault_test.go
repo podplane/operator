@@ -18,7 +18,10 @@ func TestVaultDestroyRejectsInvalidKeyBeforeRequest(t *testing.T) {
 	}))
 	defer server.Close()
 
-	backend := NewVaultBackend(VaultOptions{Name: "provider", Address: server.URL, Mount: "secret"})
+	backend, err := NewVaultBackend(VaultOptions{Name: "provider", Address: server.URL, Mount: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ks, err := NewKeyspace("cluster", "namespace", "provider.binding")
 	if err != nil {
 		t.Fatal(err)

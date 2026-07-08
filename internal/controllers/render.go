@@ -23,6 +23,10 @@ const BindingLabel = "secrets.podplane.dev/secret-provider-binding"
 // SyncToKubernetesSecretsAnnotation enables syncToKubernetesSecrets in one namespace.
 const SyncToKubernetesSecretsAnnotation = "secrets.podplane.dev/allow-sync-to-kubernetes-secrets"
 
+// providerCACertMountRoot is where the platform OpenBao/Vault CSI provider
+// charts mount provider-specific CA bundles.
+const providerCACertMountRoot = "/var/run/podplane/secrets-providers"
+
 // SecretProviderClassGVK identifies the Secrets Store CSI SecretProviderClass kind.
 var SecretProviderClassGVK = schema.GroupVersionKind{Group: "secrets-store.csi.x-k8s.io", Version: "v1", Kind: "SecretProviderClass"}
 
@@ -150,6 +154,9 @@ func (r Renderer) parameters(p ProviderConfig, ks secretsbackend.Keyspace, bindi
 		out := map[string]any{"objects": string(y)}
 		if p.Address != "" {
 			out[prefix+"Address"] = p.Address
+		}
+		if p.CACert != "" {
+			out[prefix+"CACertPath"] = path.Join(providerCACertMountRoot, p.Name, "ca.crt")
 		}
 		out["roleName"] = bindingName
 		return out, nil

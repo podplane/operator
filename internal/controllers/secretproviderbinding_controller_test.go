@@ -47,6 +47,30 @@ func TestSecretProviderClassChangedIgnoresServerMetadata(t *testing.T) {
 	}
 }
 
+func TestRendererAddsOpenBaoCACertPath(t *testing.T) {
+	binding := &secretsv1beta1.SecretProviderBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "hello", Namespace: "default"},
+		Spec: secretsv1beta1.SecretProviderBindingSpec{
+			ProviderName: "local-fakevault",
+			Items:        []secretsv1beta1.SecretProviderBindingItem{{Key: "api-key"}},
+		},
+	}
+	renderer := Renderer{ClusterID: "default", Providers: map[string]ProviderConfig{
+		"local-fakevault": {Name: "local-fakevault", Kind: "openbao", Address: "https://10.0.2.15:19443/vault/default", CACert: "-----BEGIN CERTIFICATE-----\nlocal\n-----END CERTIFICATE-----"},
+	}}
+	spc, _, err := renderer.Render(binding)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	params, ok, err := unstructured.NestedStringMap(spc.Object, "spec", "parameters")
+	if err != nil || !ok {
+		t.Fatalf("parameters = %v, %v", ok, err)
+	}
+	if got, want := params["baoCACertPath"], "/var/run/podplane/secrets-providers/local-fakevault/ca.crt"; got != want {
+		t.Fatalf("baoCACertPath = %q, want %q", got, want)
+	}
+}
+
 func TestSyncToKubernetesSecretsRequiresGlobalFlagAndNamespaceAnnotation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
