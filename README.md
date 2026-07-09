@@ -72,7 +72,7 @@ inline.
 
 Vault/OpenBao providers authenticate with Kubernetes/JWT auth. The operator uses
 its own pod service account token, logs in at `auth_path` (default
-`auth/kubernetes`), and requests `operator_role` (default provider name). Workload
+`auth/kubernetes`), and requests `operator_role` (default `podplane-operator`). Workload
 CSI mounts authenticate separately as the workload pod service account using the
 generated `SecretProviderClass` `roleName`.
 

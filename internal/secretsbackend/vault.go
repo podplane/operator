@@ -23,6 +23,8 @@ import (
 
 var serviceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
+const defaultOperatorRole = "podplane-operator"
+
 // VaultBackend stores keys in Vault or OpenBao KV-v2.
 type VaultBackend struct {
 	name, kind, address, mount, authPath, operatorRole string
@@ -64,7 +66,7 @@ func NewVaultBackend(o VaultOptions) (*VaultBackend, error) {
 	}
 	operatorRole := o.OperatorRole
 	if operatorRole == "" {
-		operatorRole = o.Name
+		operatorRole = defaultOperatorRole
 	}
 	client, err := vaultHTTPClient(o.CACert)
 	if err != nil {

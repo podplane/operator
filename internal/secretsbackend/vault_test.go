@@ -83,3 +83,13 @@ func TestVaultBackendLogsInWithServiceAccount(t *testing.T) {
 		t.Fatalf("requests = %d, want %d", got, want)
 	}
 }
+
+func TestVaultBackendDefaultsOperatorRoleToPodplaneOperator(t *testing.T) {
+	backend, err := NewVaultBackend(VaultOptions{Name: "provider", Address: "https://vault.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := backend.operatorRole, "podplane-operator"; got != want {
+		t.Fatalf("operatorRole = %q, want %q", got, want)
+	}
+}
