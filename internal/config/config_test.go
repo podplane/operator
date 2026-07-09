@@ -80,3 +80,15 @@ func TestLoadRequiresRegistryAuthIssuer(t *testing.T) {
 		t.Fatal("Load succeeded, want missing issuer error")
 	}
 }
+
+// TestLoadRequiresClusterIDForSecretsProviders verifies the secrets module has
+// a cluster identity for backend path prefixes.
+func TestLoadRequiresClusterIDForSecretsProviders(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"cluster":{},"secrets":{"providers":{"openbao":{"kind":"openbao"}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded, want missing cluster.id error")
+	}
+}

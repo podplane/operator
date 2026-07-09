@@ -68,6 +68,9 @@ func Load(path string) (File, error) {
 	if f.Secrets.Providers == nil {
 		f.Secrets.Providers = map[string]controllers.ProviderConfig{}
 	}
+	if len(f.Secrets.Providers) > 0 && f.Cluster.ID == "" {
+		return File{}, fmt.Errorf("cluster.id is required when secrets providers are configured")
+	}
 	if _, err := f.KeyRotationDuration(); err != nil {
 		return File{}, err
 	}
