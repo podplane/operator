@@ -7,10 +7,12 @@ package secretsbackend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -91,5 +93,75 @@ func TestVaultBackendDefaultsOperatorRoleToPodplaneOperator(t *testing.T) {
 	}
 	if got, want := backend.operatorRole, "podplane-operator"; got != want {
 		t.Fatalf("operatorRole = %q, want %q", got, want)
+	}
+}
+
+func TestVaultBackendLoginNotFoundIncludesAuthPath(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("service-account-jwt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTokenPath := serviceAccountTokenPath
+	serviceAccountTokenPath = tokenPath
+	t.Cleanup(func() { serviceAccountTokenPath = oldTokenPath })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"errors":["no handler for route"]}`, http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	backend, err := NewVaultBackend(VaultOptions{Name: "provider", Address: server.URL, AuthPath: "auth/missing", OperatorRole: "operator-role"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = backend.requestToken(context.Background())
+	if err == nil {
+		t.Fatal("expected login error")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("login 404 should not be reported as ErrNotFound: %v", err)
+	}
+	for _, want := range []string{"Vault/OpenBao Kubernetes login", "auth/missing/login", "404 Not Found"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("login error = %q, want substring %q", err.Error(), want)
+		}
+	}
+}
+
+func TestVaultBackendListTreatsMissingKeyspaceAsEmpty(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("service-account-jwt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTokenPath := serviceAccountTokenPath
+	serviceAccountTokenPath = tokenPath
+	t.Cleanup(func() { serviceAccountTokenPath = oldTokenPath })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/auth/kubernetes/login":
+			_, _ = w.Write([]byte("{\"auth\":{\"client_token\":\"vault-token\",\"lease_duration\":3600}}"))
+		case "/v1/secret/metadata/cluster/namespace/binding":
+			http.NotFound(w, r)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	backend, err := NewVaultBackend(VaultOptions{Name: "provider", Address: server.URL, Mount: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ks, err := NewKeyspace("cluster", "namespace", "provider.binding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := backend.List(context.Background(), ks)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries = %#v, want empty", entries)
 	}
 }

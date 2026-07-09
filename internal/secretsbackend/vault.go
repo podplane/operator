@@ -36,6 +36,7 @@ type VaultBackend struct {
 
 type vaultHTTPError struct {
 	method, path, status, body string
+	statusCode                 int
 }
 
 func (e vaultHTTPError) Error() string {
@@ -128,10 +129,7 @@ func (v *VaultBackend) rawRequest(ctx context.Context, method, apiPath, token st
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		if resp.StatusCode == 404 {
-			return nil, ErrNotFound
-		}
-		return nil, vaultHTTPError{method: method, path: apiPath, status: resp.Status, body: string(b)}
+		return nil, vaultHTTPError{method: method, path: apiPath, status: resp.Status, statusCode: resp.StatusCode, body: string(b)}
 	}
 	return resp, nil
 }
@@ -250,7 +248,7 @@ func (v *VaultBackend) write(ctx context.Context, ks Keyspace, key string, value
 func (v *VaultBackend) List(ctx context.Context, ks Keyspace) ([]Entry, error) {
 	resp, err := v.request(ctx, "LIST", v.metadataPrefix(ks), nil)
 	if err != nil {
-		if err == ErrNotFound {
+		if isVaultNotFound(err) {
 			return nil, nil
 		}
 		return nil, err
@@ -290,6 +288,9 @@ func (v *VaultBackend) metadataInfo(ctx context.Context, ks Keyspace, key string
 	api := v.mount + "/metadata/" + rel
 	resp, err := v.request(ctx, http.MethodGet, api, nil)
 	if err != nil {
+		if isVaultNotFound(err) {
+			return vaultMetadata{}, ErrNotFound
+		}
 		return vaultMetadata{}, err
 	}
 	defer resp.Body.Close()
@@ -401,4 +402,10 @@ func isVaultCheckAndSetError(err error) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(httpErr.body), "check-and-set") || strings.Contains(strings.ToLower(httpErr.body), "cas")
+}
+
+// isVaultNotFound reports whether err is a Vault/OpenBao HTTP 404 response.
+func isVaultNotFound(err error) bool {
+	var httpErr vaultHTTPError
+	return errors.As(err, &httpErr) && httpErr.statusCode == http.StatusNotFound
 }
