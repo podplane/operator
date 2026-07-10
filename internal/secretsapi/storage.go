@@ -241,7 +241,7 @@ func (s *KeyspaceStorage) backend(namespace, name string) (secretsbackend.Keyspa
 	}
 	b, err := s.Backends.Backend(provider)
 	if err != nil {
-		return secretsbackend.Keyspace{}, nil, apierrors.NewNotFound(keyspaceResource(), name)
+		return secretsbackend.Keyspace{}, nil, providerNotConfiguredError(provider, name)
 	}
 	prefix := s.keyPrefix(provider)
 	if err := secretsbackend.ValidateKeyPrefix(prefix); err != nil {
@@ -261,6 +261,24 @@ func (s *KeyspaceStorage) keyPrefix(provider string) string {
 		return prefix
 	}
 	return s.ClusterID
+}
+
+// providerNotConfiguredError reports a missing provider as a Kubernetes 404
+// while preserving the actionable configuration detail in the returned
+// message.
+func providerNotConfiguredError(provider, name string) error {
+	resource := keyspaceResource()
+	return &apierrors.StatusError{ErrStatus: metav1.Status{
+		Status:  metav1.StatusFailure,
+		Code:    404,
+		Reason:  metav1.StatusReasonNotFound,
+		Message: fmt.Sprintf("%s.%s %q not found: secrets provider %q is not configured", resource.Resource, resource.Group, name, provider),
+		Details: &metav1.StatusDetails{
+			Group: resource.Group,
+			Kind:  resource.Resource,
+			Name:  name,
+		},
+	}}
 }
 
 // check performs a SubjectAccessReview for an operator-enforced custom verb.

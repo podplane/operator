@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,6 +82,27 @@ func TestUpdateUsesExistingVirtualKeyspaceObject(t *testing.T) {
 	}
 	if backend.creates != 1 {
 		t.Fatalf("backend Create calls = %d, want 1", backend.creates)
+	}
+}
+
+func TestGetReportsUnconfiguredProvider(t *testing.T) {
+	registry, err := secretsbackend.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage := &KeyspaceStorage{ClusterID: "cluster", Backends: registry}
+	ctx := request.WithNamespace(context.Background(), "namespace")
+
+	_, err = storage.Get(ctx, "local-fakevault.hello", &metav1.GetOptions{})
+	if err == nil {
+		t.Fatal("expected unconfigured provider error")
+	}
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("error = %v, want not found", err)
+	}
+	message := err.Error()
+	if !strings.Contains(message, `secrets provider "local-fakevault" is not configured`) {
+		t.Fatalf("error = %q, want unconfigured provider detail", message)
 	}
 }
 
