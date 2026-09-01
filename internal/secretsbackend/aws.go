@@ -85,6 +85,25 @@ func (a *AWSSecretsManagerBackend) Update(ctx context.Context, ks Keyspace, key 
 	return Entry{Key: key, Status: StatusActive, BackendPath: p}, nil
 }
 
+// Read returns the current Secrets Manager value for operator-owned state.
+func (a *AWSSecretsManagerBackend) Read(ctx context.Context, ks Keyspace, key string) ([]byte, error) {
+	p, err := ks.SlashPath(key)
+	if err != nil {
+		return nil, err
+	}
+	out, err := a.client.GetSecretValue(ctx, &sm.GetSecretValueInput{SecretId: aws.String(p)})
+	if err != nil {
+		if awsErrorCode(err) == "ResourceNotFoundException" {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if out.SecretString != nil {
+		return []byte(*out.SecretString), nil
+	}
+	return append([]byte(nil), out.SecretBinary...), nil
+}
+
 // List lists Secrets Manager secrets in a keyspace.
 func (a *AWSSecretsManagerBackend) List(ctx context.Context, ks Keyspace) ([]Entry, error) {
 	prefix := "/" + strings.Join([]string{ks.Prefix, ks.Namespace, ks.BindingName}, "/") + "/"
@@ -229,6 +248,25 @@ func (a *AWSParameterStoreBackend) Update(ctx context.Context, ks Keyspace, key 
 		return Entry{}, err
 	}
 	return Entry{Key: key, Status: StatusActive, BackendPath: p}, nil
+}
+
+// Read returns the decrypted current Parameter Store value for operator-owned state.
+func (a *AWSParameterStoreBackend) Read(ctx context.Context, ks Keyspace, key string) ([]byte, error) {
+	p, err := ks.SlashPath(key)
+	if err != nil {
+		return nil, err
+	}
+	out, err := a.client.GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String(p), WithDecryption: aws.Bool(true)})
+	if err != nil {
+		if awsErrorCode(err) == "ParameterNotFound" {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if out.Parameter == nil || out.Parameter.Value == nil {
+		return nil, ErrNotFound
+	}
+	return []byte(*out.Parameter.Value), nil
 }
 
 // List lists Parameter Store parameters in a keyspace.

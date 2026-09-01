@@ -105,6 +105,25 @@ func (g *GCPSecretManagerBackend) Update(ctx context.Context, ks Keyspace, key s
 	return Entry{Key: key, Status: StatusActive, BackendPath: id}, nil
 }
 
+// Read returns the latest Google Secret Manager value for operator-owned state.
+func (g *GCPSecretManagerBackend) Read(ctx context.Context, ks Keyspace, key string) ([]byte, error) {
+	id, err := ks.GCPSecretID(key)
+	if err != nil {
+		return nil, err
+	}
+	out, err := g.client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: g.versionName(id)})
+	if err != nil {
+		if grpcstatus.Code(err) == codes.NotFound {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if out.Payload == nil {
+		return nil, ErrNotFound
+	}
+	return append([]byte(nil), out.Payload.Data...), nil
+}
+
 // List lists Google Secret Manager secrets in a keyspace.
 func (g *GCPSecretManagerBackend) List(ctx context.Context, ks Keyspace) ([]Entry, error) {
 	prefix := strings.Join([]string{ks.Prefix, ks.Namespace, ks.BindingName}, "_") + "_"

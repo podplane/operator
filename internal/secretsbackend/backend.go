@@ -72,6 +72,13 @@ type Backend interface {
 	DestroyAll(ctx context.Context, ks Keyspace) error
 }
 
+// ValueReader reads backend values for operator-owned internal state. It is
+// deliberately separate from Backend so the aggregated Secrets API remains
+// write-only for secret payloads.
+type ValueReader interface {
+	Read(ctx context.Context, ks Keyspace, key string) ([]byte, error)
+}
+
 var dnsLabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 // ValidateProviderName validates a cluster-unique provider name.

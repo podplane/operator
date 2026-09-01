@@ -11,19 +11,26 @@ import (
 	"log/slog"
 	"os"
 
+	certv1 "k8s.io/api/certificates/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	kubernetes "k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	secretsv1beta1 "github.com/podplane/operator/api/v1beta1"
 	operatorconfig "github.com/podplane/operator/internal/config"
 	"github.com/podplane/operator/internal/controllers"
 	"github.com/podplane/operator/internal/extensionserver"
+	"github.com/podplane/operator/internal/ingresspki"
 	"github.com/podplane/operator/internal/registryauth"
+	"github.com/podplane/operator/internal/sds"
 	"github.com/podplane/operator/internal/secretsapi"
 	"github.com/podplane/operator/internal/secretsbackend"
+	"github.com/podplane/operator/internal/workloadpki"
 )
 
 // main starts the controller manager and aggregated API server.
@@ -36,14 +43,31 @@ func main() {
 
 // run starts the controller manager and aggregated API server.
 func run() error {
-	var cfgPath, aggregatedAPIAddr, aggregatedAPICertFile, aggregatedAPIKeyFile, registryAuthAddr, registryAuthCertFile, registryAuthKeyFile string
+	if len(os.Args) > 1 && os.Args[1] == "sds" {
+		return sds.Run(ctrl.SetupSignalHandler(), os.Args[2:])
+	}
+	var (
+		cfgPath                  string
+		servingNamespace         string
+		aggregatedAPIAddr        string
+		aggregatedAPICertFile    string
+		aggregatedAPIKeyFile     string
+		aggregatedAPIServiceName string
+		registryAuthAddr         string
+		registryAuthCertFile     string
+		registryAuthKeyFile      string
+		registryAuthServiceName  string
+	)
 	flag.StringVar(&cfgPath, "config", "/etc/podplane-operator/config.json", "operator JSON config")
+	flag.StringVar(&servingNamespace, "serving-namespace", "", "namespace containing operator serving Services")
 	flag.StringVar(&aggregatedAPIAddr, "aggregated-api-bind-address", ":8443", "HTTPS address for aggregated API traffic")
 	flag.StringVar(&aggregatedAPICertFile, "aggregated-api-tls-cert-file", "/var/run/podplane/tls/tls.crt", "TLS certificate file for the aggregated API endpoint")
 	flag.StringVar(&aggregatedAPIKeyFile, "aggregated-api-tls-private-key-file", "/var/run/podplane/tls/tls.key", "TLS private key file for the aggregated API endpoint")
+	flag.StringVar(&aggregatedAPIServiceName, "aggregated-api-service-name", "", "Service name for the operator-issued aggregated API certificate")
 	flag.StringVar(&registryAuthAddr, "registry-auth-bind-address", ":9443", "HTTPS address for optional Docker registry auth endpoint")
 	flag.StringVar(&registryAuthCertFile, "registry-auth-tls-cert-file", "/var/run/podplane/registry-auth-tls/tls.crt", "TLS certificate file for the registry auth endpoint")
 	flag.StringVar(&registryAuthKeyFile, "registry-auth-tls-private-key-file", "/var/run/podplane/registry-auth-tls/tls.key", "TLS private key file for the registry auth endpoint")
+	flag.StringVar(&registryAuthServiceName, "registry-auth-service-name", "", "Service name for the operator-issued registry auth certificate")
 	flag.Parse()
 
 	ctx := ctrl.SetupSignalHandler()
@@ -56,9 +80,46 @@ func run() error {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(secretsv1beta1.AddToScheme(scheme))
 	restCfg := ctrl.GetConfigOrDie()
-	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{Scheme: scheme})
+	options := ctrl.Options{Scheme: scheme}
+	if cfg.Cluster.SPIFFE.TrustDomain != "" {
+		options.Cache.ByObject = map[client.Object]cache.ByObject{&certv1.PodCertificateRequest{}: {Field: fields.OneTermEqualSelector("spec.signerName", workloadpki.SignerName)}}
+	}
+	mgr, err := ctrl.NewManager(restCfg, options)
 	if err != nil {
 		return err
+	}
+	if cfg.Cluster.SPIFFE.TrustDomain != "" {
+		caPath := cfg.Certificates.CAPath
+		if caPath == "" {
+			caPath = "/var/run/podplane/certificates/workload-ca-key.pem"
+		}
+		serving := []workloadpki.ServingCertificate{{Name: "aggregated-api", CertFile: aggregatedAPICertFile, KeyFile: aggregatedAPIKeyFile, DNSNames: workloadpki.ServiceDNSNames(aggregatedAPIServiceName, servingNamespace)}}
+		if cfg.Registry.Auth.Enabled {
+			serving = append(serving, workloadpki.ServingCertificate{Name: "registry-auth", CertFile: registryAuthCertFile, KeyFile: registryAuthKeyFile, DNSNames: workloadpki.ServiceDNSNames(registryAuthServiceName, servingNamespace)})
+		}
+		signer, err := workloadpki.NewManager(mgr.GetClient(), mgr.GetAPIReader(), workloadpki.Config{TrustDomain: cfg.Cluster.SPIFFE.TrustDomain, CAPath: caPath, Serving: serving})
+		if err != nil {
+			return err
+		}
+		if err = signer.Initialize(ctx); err != nil {
+			return err
+		}
+		if err = mgr.Add(signer); err != nil {
+			return err
+		}
+		if err = mgr.AddReadyzCheck("workload-certificates", signer.Ready); err != nil {
+			return err
+		}
+		if err = (&workloadpki.Reconciler{Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Signer: signer}).SetupWithManager(mgr); err != nil {
+			return err
+		}
+		injector := workloadpki.NewInjector(mgr.GetClient(), mgr.GetAPIReader(), signer)
+		if err = mgr.Add(injector); err != nil {
+			return err
+		}
+		if err = mgr.AddReadyzCheck("workload-ca-injector", injector.Ready); err != nil {
+			return err
+		}
 	}
 
 	providerMap := map[string]controllers.ProviderConfig{}
@@ -81,6 +142,9 @@ func run() error {
 	}
 	registry, err := secretsbackend.NewRegistry(backends...)
 	if err != nil {
+		return err
+	}
+	if err := ingresspki.Setup(ctx, mgr, cfg.IngressCertificates, registry); err != nil {
 		return err
 	}
 

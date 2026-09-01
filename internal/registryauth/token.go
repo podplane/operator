@@ -6,12 +6,15 @@ package registryauth
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 )
 
 // TokenValidator validates a Docker refresh token and returns its expiry.
@@ -39,13 +42,29 @@ func (s *Server) Run(ctx context.Context, opts Options) error {
 	if opts.CertFile == "" || opts.KeyFile == "" {
 		return fmt.Errorf("registry auth TLS certificate and private key files are required")
 	}
+	cert, err := certwatcher.New(opts.CertFile, opts.KeyFile)
+	if err != nil {
+		return err
+	}
+	go func() {
+		if err := cert.Start(ctx); err != nil {
+			slog.Error("registry auth TLS certificate watcher failed", "error", err)
+		}
+	}()
 	listener, err := net.Listen("tcp", opts.Addr)
 	if err != nil {
 		return err
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/token", s)
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		TLSConfig: &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: cert.GetCertificate,
+		},
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -55,7 +74,7 @@ func (s *Server) Run(ctx context.Context, opts Options) error {
 		}
 	}()
 	go func() {
-		if err := server.ServeTLS(listener, opts.CertFile, opts.KeyFile); err != nil && err != http.ErrServerClosed {
+		if err := server.ServeTLS(listener, "", ""); err != nil && err != http.ErrServerClosed {
 			slog.Error("registry auth server failed", "error", err)
 		}
 	}()

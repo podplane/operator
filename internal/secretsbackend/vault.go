@@ -34,15 +34,18 @@ type VaultBackend struct {
 	loginTokenExpires                                  time.Time
 }
 
+// vaultHTTPError retains an HTTP status for provider-specific error mapping.
 type vaultHTTPError struct {
 	method, path, status, body string
 	statusCode                 int
 }
 
+// Error renders the error without exposing sensitive state.
 func (e vaultHTTPError) Error() string {
 	return fmt.Sprintf("%s %s failed: %s: %s", e.method, e.path, e.status, e.body)
 }
 
+// vaultMetadata is the lifecycle state of a Vault KV-v2 value.
 type vaultMetadata struct {
 	currentVersion int
 	archived       bool
@@ -127,7 +130,7 @@ func (v *VaultBackend) rawRequest(ctx context.Context, method, apiPath, token st
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, vaultHTTPError{method: method, path: apiPath, status: resp.Status, statusCode: resp.StatusCode, body: string(b)}
 	}
@@ -153,7 +156,7 @@ func (v *VaultBackend) requestToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("Vault/OpenBao Kubernetes login: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var raw struct {
 		Auth struct {
 			ClientToken   string `json:"client_token"`
@@ -226,6 +229,35 @@ func (v *VaultBackend) Update(ctx context.Context, ks Keyspace, key string, valu
 	return v.write(ctx, ks, key, value, meta.currentVersion)
 }
 
+// Read returns the current KV-v2 value for operator-owned state.
+func (v *VaultBackend) Read(ctx context.Context, ks Keyspace, key string) ([]byte, error) {
+	_, dataPath, err := v.dataPath(ks, key)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := v.request(ctx, http.MethodGet, dataPath, nil)
+	if err != nil {
+		if isVaultNotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var raw struct {
+		Data struct {
+			Data map[string]string `json:"data"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	value, ok := raw.Data.Data["value"]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return []byte(value), nil
+}
+
 // write writes a KV-v2 value.
 func (v *VaultBackend) write(ctx context.Context, ks Keyspace, key string, value []byte, cas int) (Entry, error) {
 	rel, dp, err := v.dataPath(ks, key)
@@ -240,7 +272,7 @@ func (v *VaultBackend) write(ctx context.Context, ks Keyspace, key string, value
 		}
 		return Entry{}, err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return Entry{Key: key, Status: StatusActive, BackendPath: v.mount + "/data/" + rel}, nil
 }
 
@@ -253,7 +285,7 @@ func (v *VaultBackend) List(ctx context.Context, ks Keyspace) ([]Entry, error) {
 		}
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var raw struct {
 		Data struct {
 			Keys []string `json:"keys"`
@@ -293,7 +325,7 @@ func (v *VaultBackend) metadataInfo(ctx context.Context, ks Keyspace, key string
 		}
 		return vaultMetadata{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var raw struct {
 		Data struct {
 			CurrentVersion int `json:"current_version"`
@@ -324,7 +356,7 @@ func (v *VaultBackend) Archive(ctx context.Context, ks Keyspace, key string) err
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return nil
 }
 
@@ -362,7 +394,7 @@ func (v *VaultBackend) Restore(ctx context.Context, ks Keyspace, key string) (En
 	if err != nil {
 		return Entry{}, err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return Entry{Key: key, Status: StatusActive, BackendPath: v.mount + "/data/" + rel}, nil
 }
 
@@ -377,7 +409,7 @@ func (v *VaultBackend) Destroy(ctx context.Context, ks Keyspace, key string) err
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return nil
 }
 

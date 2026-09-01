@@ -92,3 +92,45 @@ func TestLoadRequiresClusterIDForSecretsProviders(t *testing.T) {
 		t.Fatal("Load succeeded, want missing cluster.id error")
 	}
 }
+
+// TestLoadIngressCertificates decodes operator-managed ingress state.
+func TestLoadIngressCertificates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	contents := `{
+		"cluster":{"id":"test-cluster"},
+		"secrets":{"default_provider":"aws","providers":{"aws":{"kind":"aws","object_type":"secretsmanager"}}},
+		"ingress_certificates":{
+			"acme":{"server":"https://acme.example/directory","email":"ops@example.com"},
+			"domains":{"example.com":{"dns_provider":{"kind":"aws-route53","region":"us-east-1","hosted_zone_id":"Z123","role_arn":"arn:aws:iam::123:role/acme"}}}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := cfg.IngressCertificates.Provider, "aws"; got != want {
+		t.Fatalf("IngressCertificates.Provider = %q, want %q", got, want)
+	}
+	if got, want := cfg.IngressCertificates.KeyPrefix, "test-cluster"; got != want {
+		t.Fatalf("IngressCertificates.KeyPrefix = %q, want %q", got, want)
+	}
+	provider := cfg.IngressCertificates.Domains["example.com"].Provider
+	if provider == nil || provider.RoleARN != "arn:aws:iam::123:role/acme" {
+		t.Fatalf("DNS provider = %#v", provider)
+	}
+}
+
+// TestLoadIngressCertificatesRequiresStorageProvider rejects state without a backend.
+func TestLoadIngressCertificatesRequiresStorageProvider(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	contents := `{"cluster":{"id":"test-cluster"},"secrets":{"providers":{}},"ingress_certificates":{"domains":{"example.com":{}}}}`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load succeeded, want missing storage provider error")
+	}
+}

@@ -32,7 +32,7 @@ func (p *PublicKey) DeepCopyObject() runtime.Object {
 		return nil
 	}
 	out := *p
-	out.ObjectMeta = *p.ObjectMeta.DeepCopy()
+	p.DeepCopyInto(&out.ObjectMeta)
 	return &out
 }
 
@@ -58,7 +58,7 @@ func (s *SecretProviderKeyspace) DeepCopyObject() runtime.Object {
 		return nil
 	}
 	out := *s
-	out.ObjectMeta = *s.ObjectMeta.DeepCopy()
+	s.DeepCopyInto(&out.ObjectMeta)
 	out.Spec.Entries = append([]SecretProviderKeyspaceEntry(nil), s.Spec.Entries...)
 	for i := range out.Spec.Entries {
 		if s.Spec.Entries[i].EncryptedValue != nil {

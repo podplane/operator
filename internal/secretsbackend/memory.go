@@ -16,6 +16,8 @@ type MemoryBackend struct {
 	mu         sync.Mutex
 	values     map[string]memEntry
 }
+
+// memEntry stores one in-memory value and its lifecycle state.
 type memEntry struct {
 	value       []byte
 	archived    bool
@@ -76,6 +78,24 @@ func (m *MemoryBackend) Update(_ context.Context, ks Keyspace, key string, value
 	e.backendPath = p
 	m.values[id] = e
 	return Entry{Key: key, Status: StatusActive, BackendPath: p}, nil
+}
+
+// Read returns an active in-memory value for operator-owned state.
+func (m *MemoryBackend) Read(_ context.Context, ks Keyspace, key string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id, _, err := m.key(ks, key)
+	if err != nil {
+		return nil, err
+	}
+	e, ok := m.values[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if e.archived {
+		return nil, ErrArchived
+	}
+	return append([]byte(nil), e.value...), nil
 }
 
 // List lists in-memory keys in a keyspace.

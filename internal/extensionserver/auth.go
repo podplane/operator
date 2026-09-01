@@ -123,6 +123,12 @@ func delegatedAuth(ctx context.Context, kube kubernetes.Interface) (*requestHead
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	authz = authzunion.New(pathAuthorizer, authz)
+	authz, err = authzunion.New(
+		authzunion.NamedAuthorizer{AuthorizerName: "health-paths", Authorizer: pathAuthorizer},
+		authzunion.NamedAuthorizer{AuthorizerName: "delegated", Authorizer: authz},
+	)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
 	return rh, authn, authz, rhConfig, nil
 }
