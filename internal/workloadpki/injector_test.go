@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // missingInjectionTargetReader records named reads and rejects list operations.
@@ -48,6 +49,50 @@ func TestInjectorGetsOnlyNamedTargets(t *testing.T) {
 	}
 	if reader.gets != len(injectionTargets) {
 		t.Fatalf("GET count = %d, want %d", reader.gets, len(injectionTargets))
+	}
+}
+
+// TestInjectorAcceptsOnlyWorkloadSource verifies injection source aliases are closed.
+func TestInjectorAcceptsOnlyWorkloadSource(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		source string
+		want   bool
+	}{
+		{"workload", workloadCASource, true},
+		{"signer name", SignerName, false},
+		{"unknown", "other", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			target := injectionTargets[0]
+			obj := &unstructured.Unstructured{Object: map[string]any{
+				"metadata": map[string]any{
+					"name":        target.name,
+					"annotations": map[string]any{InjectCAFromAnnotation: tt.source},
+				},
+				"spec": map[string]any{"service": map[string]any{
+					"namespace": target.service.Namespace,
+					"name":      target.service.Name,
+				}},
+			}}
+			obj.SetGroupVersionKind(target.gvk)
+			c := fake.NewClientBuilder().WithObjects(obj).Build()
+			if err := NewInjector(c, c, staticBundle("roots")).inject(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			got := &unstructured.Unstructured{}
+			got.SetGroupVersionKind(target.gvk)
+			if err := c.Get(context.Background(), client.ObjectKey{Name: target.name}, got); err != nil {
+				t.Fatal(err)
+			}
+			_, found, err := unstructured.NestedString(got.Object, "spec", "caBundle")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if found != tt.want {
+				t.Fatalf("caBundle present = %t, want %t", found, tt.want)
+			}
+		})
 	}
 }
 

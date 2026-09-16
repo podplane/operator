@@ -23,6 +23,8 @@ import (
 // InjectCAFromAnnotation opts an allow-listed API extension into workload CA injection.
 const InjectCAFromAnnotation = "certificates.podplane.dev/inject-ca-from"
 
+const workloadCASource = "workload"
+
 // injectionTarget identifies one extension and its required serving endpoint.
 type injectionTarget struct {
 	gvk     schema.GroupVersionKind
@@ -121,7 +123,7 @@ func (i *Injector) inject(ctx context.Context) error {
 			}
 			return fmt.Errorf("get %s %s: %w", target.gvk.Kind, target.name, err)
 		}
-		if obj.GetAnnotations()[InjectCAFromAnnotation] != SignerName {
+		if obj.GetAnnotations()[InjectCAFromAnnotation] != workloadCASource {
 			continue
 		}
 		before := obj.DeepCopy()
