@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/go-logr/logr"
 	certv1 "k8s.io/api/certificates/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -43,6 +44,7 @@ func main() {
 
 // run starts the controller manager and aggregated API server.
 func run() error {
+	ctrl.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 	if len(os.Args) > 1 && os.Args[1] == "sds" {
 		return sds.Run(ctrl.SetupSignalHandler(), os.Args[2:])
 	}
