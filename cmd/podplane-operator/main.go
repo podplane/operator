@@ -91,7 +91,7 @@ func run() error {
 	if cfg.Cluster.SPIFFE.TrustDomain != "" {
 		caPath := cfg.Certificates.CAPath
 		if caPath == "" {
-			caPath = "/var/run/podplane/certificates/workload-ca-key.pem"
+			caPath = "/var/run/podplane/certificates/workload-ca-key"
 		}
 		serving := []workloadpki.ServingCertificate{{Name: "aggregated-api", CertFile: aggregatedAPICertFile, KeyFile: aggregatedAPIKeyFile, DNSNames: workloadpki.ServiceDNSNames(aggregatedAPIServiceName, servingNamespace)}}
 		if cfg.Registry.Auth.Enabled {
