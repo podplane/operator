@@ -8,20 +8,31 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	discoveryv3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	secretv3 "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // TestCertificateFlags validates accepted, malformed, and duplicate mappings.
@@ -45,7 +56,7 @@ func TestLoadBuildsValidatedTLSResources(t *testing.T) {
 	directory := t.TempDir()
 	writeBundle(t, directory, "bundle-example", certificateBundle(t, "example.com", 1))
 
-	hashes, resources, err := load(directory, certificateFlags{"bundle-example": "example.com"})
+	hashes, resources, err := load(directory, certificateFlags{"bundle-example": "example.com"}, nil)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -62,7 +73,7 @@ func TestLoadBuildsValidatedTLSResources(t *testing.T) {
 func TestLoadRejectsWrongDomain(t *testing.T) {
 	directory := t.TempDir()
 	writeBundle(t, directory, "bundle-example", certificateBundle(t, "example.com", 1))
-	if _, _, err := load(directory, certificateFlags{"bundle-example": "example.net"}); err == nil {
+	if _, _, err := load(directory, certificateFlags{"bundle-example": "example.net"}, nil); err == nil {
 		t.Fatal("load accepted a certificate for another domain")
 	}
 }
@@ -75,7 +86,7 @@ func TestPollPublishesValidRotation(t *testing.T) {
 	second := certificateBundle(t, "example.com", 2)
 	writeBundle(t, directory, name, first)
 	flags := certificateFlags{name: "example.com"}
-	hashes, resources, err := load(directory, flags)
+	hashes, resources, err := load(directory, flags, nil)
 	if err != nil {
 		t.Fatalf("load initial bundle: %v", err)
 	}
@@ -84,7 +95,7 @@ func TestPollPublishesValidRotation(t *testing.T) {
 	initialKey := resourceKey(t, cache, name)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go poll(ctx, 5*time.Millisecond, directory, flags, cache, hashes)
+	go poll(ctx, 5*time.Millisecond, directory, flags, nil, cache, hashes)
 	writeBundle(t, directory, name, second)
 
 	waitFor(t, func() bool { return !bytes.Equal(resourceKey(t, cache, name), initialKey) })
@@ -96,7 +107,7 @@ func TestPollRetainsLastGoodRotation(t *testing.T) {
 	name := "bundle-example"
 	writeBundle(t, directory, name, certificateBundle(t, "example.com", 1))
 	flags := certificateFlags{name: "example.com"}
-	hashes, resources, err := load(directory, flags)
+	hashes, resources, err := load(directory, flags, nil)
 	if err != nil {
 		t.Fatalf("load initial bundle: %v", err)
 	}
@@ -105,7 +116,7 @@ func TestPollRetainsLastGoodRotation(t *testing.T) {
 	initialKey := resourceKey(t, cache, name)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go poll(ctx, 5*time.Millisecond, directory, flags, cache, hashes)
+	go poll(ctx, 5*time.Millisecond, directory, flags, nil, cache, hashes)
 
 	writeBundle(t, directory, name, []byte("not PEM"))
 	time.Sleep(25 * time.Millisecond)
@@ -124,6 +135,203 @@ func TestPollRetainsLastGoodRotation(t *testing.T) {
 	if got := resourceKey(t, cache, name); !bytes.Equal(got, initialKey) {
 		t.Fatal("missing rotation replaced the last-known-good resource")
 	}
+}
+
+// TestRunNodeCertificate serves a multi-domain Ed25519 bundle over the SDS socket.
+func TestRunNodeCertificate(t *testing.T) {
+	directory := t.TempDir()
+	bundle := nodeBundle(t, nil)
+	writeBundle(t, directory, "node.pem", bundle)
+	// Keep the Unix socket path below platform limits even with long test names.
+	socketDir, err := os.MkdirTemp("/tmp", "sds-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socket := filepath.Join(socketDir, "sds.sock")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, []string{"--socket=" + socket, "--certificates-dir=" + directory, "--poll-interval=5ms", "--node-certificate=example.com,example.net"})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Run: %v", err)
+		}
+	})
+	conn, err := grpc.NewClient("unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	client := secretv3.NewSecretDiscoveryServiceClient(conn)
+	stream, err := client.StreamSecrets(ctx, grpc.WaitForReady(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(&discoveryv3.DiscoveryRequest{TypeUrl: resourcev3.SecretType, ResourceNames: []string{"node"}}); err != nil {
+		t.Fatal(err)
+	}
+	response, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Resources) != 1 {
+		t.Fatalf("received %d resources, want one", len(response.Resources))
+	}
+	var secret tlsv3.Secret
+	if err := response.Resources[0].UnmarshalTo(&secret); err != nil {
+		t.Fatal(err)
+	}
+	if secret.Name != "node" {
+		t.Fatalf("resource name = %q, want node", secret.Name)
+	}
+	pair, err := tls.X509KeyPair(secret.GetTlsCertificate().GetCertificateChain().GetInlineBytes(), secret.GetTlsCertificate().GetPrivateKey().GetInlineBytes())
+	if err != nil {
+		t.Fatalf("SDS keypair: %v", err)
+	}
+	if _, ok := pair.PrivateKey.(ed25519.PrivateKey); !ok {
+		t.Fatal("SDS did not serve an Ed25519 key")
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"example.com", "*.example.com", "example.net", "*.example.net", "localhost", "node-1"} {
+		if !slices.Contains(leaf.DNSNames, name) {
+			t.Errorf("SDS certificate missing %q", name)
+		}
+	}
+	if len(leaf.IPAddresses) != 2 {
+		t.Fatalf("SDS certificate has %d IP SANs, want two", len(leaf.IPAddresses))
+	}
+	if err := stream.Send(&discoveryv3.DiscoveryRequest{TypeUrl: resourcev3.SecretType, ResourceNames: []string{"node"}, VersionInfo: response.VersionInfo, ResponseNonce: response.Nonce}); err != nil {
+		t.Fatal(err)
+	}
+	replacement := nodeBundle(t, nil)
+	writeBundle(t, directory, "replacement.pem", replacement)
+	if err := os.Rename(filepath.Join(directory, "replacement.pem"), filepath.Join(directory, "node.pem")); err != nil {
+		t.Fatal(err)
+	}
+	response, err = stream.Recv()
+	if err != nil {
+		t.Fatalf("receive atomic replacement: %v", err)
+	}
+	if len(response.Resources) != 1 {
+		t.Fatalf("replacement has %d resources, want one", len(response.Resources))
+	}
+	if err := response.Resources[0].UnmarshalTo(&secret); err != nil {
+		t.Fatal(err)
+	}
+	_, expectedKey := pem.Decode(replacement)
+	if secret.Name != "node" || !bytes.Equal(secret.GetTlsCertificate().GetPrivateKey().GetInlineBytes(), expectedKey) {
+		t.Fatal("SDS did not publish the replacement node certificate")
+	}
+	if err := stream.Send(&discoveryv3.DiscoveryRequest{TypeUrl: resourcev3.SecretType, ResourceNames: []string{"node.pem"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("unconfigured resource error = %v, want PermissionDenied", err)
+	}
+}
+
+// TestRunRejectsInvalidNodeBundles exercises shared validation through the CLI.
+func TestRunRejectsInvalidNodeBundles(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*x509.Certificate)
+		want   string
+	}{
+		{"missing apex", func(c *x509.Certificate) { c.DNSNames = slices.Delete(c.DNSNames, 2, 3) }, `missing DNS name "example.net"`},
+		{"missing wildcard", func(c *x509.Certificate) { c.DNSNames = slices.Delete(c.DNSNames, 3, 4) }, `missing DNS name "*.example.net"`},
+		{"expired", func(c *x509.Certificate) { c.NotAfter = time.Now().Add(-time.Second) }, "not currently valid"},
+		{"not yet valid", func(c *x509.Certificate) { c.NotBefore = time.Now().Add(time.Minute) }, "not currently valid"},
+		{"client only", func(c *x509.Certificate) { c.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth} }, "does not permit server authentication"},
+		{"malformed", nil, "invalid PEM data"},
+		{"mismatched key", nil, "validate keypair"},
+		{"invalid chain", nil, "validate certificate chain"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			directory := t.TempDir()
+			bundle := nodeBundle(t, tc.mutate)
+			switch tc.name {
+			case "malformed":
+				bundle = []byte("not PEM")
+			case "mismatched key":
+				cert, _ := pem.Decode(bundle)
+				_, otherKey := pem.Decode(nodeBundle(t, nil))
+				bundle = append(pem.EncodeToMemory(cert), otherKey...)
+			case "invalid chain":
+				otherCert, _ := pem.Decode(nodeBundle(t, nil))
+				bundle = append(bundle, pem.EncodeToMemory(otherCert)...)
+			}
+			writeBundle(t, directory, "node.pem", bundle)
+			err := Run(context.Background(), []string{"--certificates-dir=" + directory, "--node-certificate=example.com,example.net"})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Run error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunCertificateModes verifies exclusive flags, required inputs, and unchanged NLB SAN policy.
+func TestRunCertificateModes(t *testing.T) {
+	directory := t.TempDir()
+	writeBundle(t, directory, "nlb", nodeBundle(t, func(c *x509.Certificate) {
+		c.DNSNames = []string{"example.com", "*.example.com", "localhost"}
+	}))
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--domain-certificate=nlb=example.com", "--node-certificate=example.com"}, "mutually exclusive"},
+		{[]string{"--domain-certificate=node=example.com"}, "reserved for the node certificate"},
+		{[]string{"--domain-certificate=nlb=example.com"}, "do not match"},
+		{[]string{"--node-certificate=example.com"}, "read resource"},
+		{[]string{"--node-certificate="}, "comma-separated list of apex domains"},
+		{[]string{"--node-certificate=*.example.com"}, "comma-separated list of apex domains"},
+		{[]string{"--node-certificate=ingress=example.com"}, "comma-separated list of apex domains"},
+		{[]string{"--node-certificate=example.com,"}, "comma-separated list of apex domains"},
+		{[]string{"--node-certificate=example.com,*.example.net"}, "comma-separated list of apex domains"},
+		{[]string{"--node-certificate=example.com", "--poll-interval=0s"}, "positive poll interval"},
+		{nil, "at least one certificate"},
+	} {
+		err := Run(context.Background(), append([]string{"--certificates-dir=" + directory}, tc.args...))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Run(%v) error = %v, want %q", tc.args, err, tc.want)
+		}
+	}
+}
+
+// nodeBundle creates an Ed25519 fixture with multiple domains and node identity SANs.
+func nodeBundle(t *testing.T, mutate func(*x509.Certificate)) []byte {
+	t.Helper()
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"example.com", "*.example.com", "example.net", "*.example.net", "localhost", "node-1"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("192.0.2.1")},
+	}
+	if mutate != nil {
+		mutate(template)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, pub, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})...)
 }
 
 // TestListenProtectsSocketPath verifies non-socket refusal and exact socket permissions.

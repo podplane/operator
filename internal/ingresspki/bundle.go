@@ -29,7 +29,17 @@ type bundleInfo struct {
 
 // ValidateBundle splits and validates a combined ingress certificate bundle.
 func ValidateBundle(bundle []byte, domain string, now time.Time) ([]byte, []byte, error) {
-	_, certPEM, keyPEM, err := parseBundle(bundle, domain, now)
+	_, certPEM, keyPEM, err := parseBundle(bundle, []string{domain}, true, now)
+	return certPEM, keyPEM, err
+}
+
+// ValidateNodeBundle validates a node-local bundle covering every apex and wildcard,
+// allowing additional DNS and IP SANs for localhost and node identities.
+func ValidateNodeBundle(bundle []byte, domains []string, now time.Time) ([]byte, []byte, error) {
+	if len(domains) == 0 {
+		return nil, nil, fmt.Errorf("at least one node certificate domain is required")
+	}
+	_, certPEM, keyPEM, err := parseBundle(bundle, domains, false, now)
 	return certPEM, keyPEM, err
 }
 
@@ -78,12 +88,13 @@ func joinBundle(certificate, privateKey []byte) []byte {
 
 // validateBundle enforces the policy constraints for bundle.
 func validateBundle(bundle []byte, domain string, now time.Time) (bundleInfo, error) {
-	info, _, _, err := parseBundle(bundle, domain, now)
+	info, _, _, err := parseBundle(bundle, []string{domain}, true, now)
 	return info, err
 }
 
-// parseBundle splits a combined PEM bundle and enforces ingress certificate policy.
-func parseBundle(bundle []byte, domain string, now time.Time) (bundleInfo, []byte, []byte, error) {
+// parseBundle splits a combined PEM bundle and validates its apex/wildcard SANs,
+// rejecting additional DNS names when exact is true.
+func parseBundle(bundle []byte, domains []string, exact bool, now time.Time) (bundleInfo, []byte, []byte, error) {
 	var certPEM, keyPEM bytes.Buffer
 	var certificates []*x509.Certificate
 	rest := bundle
@@ -114,12 +125,20 @@ func parseBundle(bundle []byte, domain string, now time.Time) (bundleInfo, []byt
 		return bundleInfo{}, nil, nil, fmt.Errorf("validate keypair: %w", err)
 	}
 	leaf := certificates[0]
-	wantNames := []string{domain, "*." + domain}
+	var wantNames []string
+	for _, domain := range domains {
+		wantNames = append(wantNames, domain, "*."+domain)
+	}
 	gotNames := append([]string(nil), leaf.DNSNames...)
 	slices.Sort(wantNames)
 	slices.Sort(gotNames)
-	if !slices.Equal(gotNames, wantNames) {
+	if exact && !slices.Equal(gotNames, wantNames) {
 		return bundleInfo{}, nil, nil, fmt.Errorf("certificate DNS names %v do not match %v", gotNames, wantNames)
+	}
+	for _, name := range wantNames {
+		if !slices.Contains(gotNames, name) {
+			return bundleInfo{}, nil, nil, fmt.Errorf("certificate is missing DNS name %q", name)
+		}
 	}
 	if now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) {
 		return bundleInfo{}, nil, nil, fmt.Errorf("certificate is not currently valid")

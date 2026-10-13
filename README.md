@@ -6,14 +6,17 @@ The Podplane Operator provides features which improve the PaaS developer experie
 
 ## Current Features
 
-Podplane Secrets:
-
-- Adds a convention-based DX on top of the [secrets-store-csi-driver](https://secrets-store-csi-driver.sigs.k8s.io/).
-    - Read path: enables `podplane secret` CLI functionality.
-    - Write path: simplifies template configuration with a "binding" CRD.
-- A `SecretProviderBinding` CRD and controller that renders/manages Secrets Store CSI `SecretProviderClass` objects.
-- An aggregated API extension to create, update, delete, restore, and destroy upstream provider secrets.
-- Backend adapters for OpenBao/Vault KV-v2, AWS Secrets Manager, AWS Parameter Store, and GCP Secret Manager.
+- **Podplane Secrets:** CLI secret management and binding-based Secrets Store CSI
+  mounts, backed by Vault/OpenBao, AWS Secrets Manager/Parameter Store, and Google
+  Secret Manager.
+- **Workload certificates:** Kubernetes Pod Certificate signing for SPIFFE
+  identities and service TLS, trust-bundle publication, and CA injection into API
+  extensions and webhooks.
+- **Ingress certificates:** self-signed fallback and optional ACME DNS-01 issuance
+  and renewal, with certificate bundles stored in external secrets providers.
+- **Envoy SDS:** certificate delivery and live reload for secrets-backed
+  per-domain or node-local ingress certificates.
+- **Registry authentication:** an OIDC-backed Docker registry token service.
 
 ## Configuration
 
@@ -99,6 +102,37 @@ Pods must set an explicit, non-empty `spec.serviceAccountName`, and every mounte
 Secrets Store CSI `secretProviderClass` must equal that service account name.
 Pods that omit `serviceAccountName` are denied rather than being treated as the
 Kubernetes `default` service account for this policy.
+
+### Podplane Secrets
+
+Adds a convention-based DX on top of the [secrets-store-csi-driver](https://secrets-store-csi-driver.sigs.k8s.io/).
+  - Read path: enables `podplane secret` CLI functionality.
+  - Write path: simplifies template configuration with a "binding" CRD.
+
+This consists of:
+  - A `SecretProviderBinding` CRD and controller that renders/manages Secrets Store CSI `SecretProviderClass` objects.
+  - An aggregated API extension to create, update, delete, restore, and destroy upstream provider secrets.
+  - Backend adapters for OpenBao/Vault KV-v2, AWS Secrets Manager, AWS Parameter Store, and GCP Secret Manager.
+
+### Envoy SDS
+
+`podplane-operator sds` supplies HTTPS certificates to Envoy over a Unix socket.
+It reloads updated files without restarting Envoy; it does not issue or renew
+certificates.
+
+- **NLB ingress:** repeat `--domain-certificate=<resource>=<domain>` for each bundle.
+- **Tunnel ingress:** use `--node-certificate=<domain>,<domain>,...` for the domains
+  covered by the node's shared `node.pem` bundle. Do not combine the two modes.
+
+Domain bundles use their resource name as the filename; `node` is reserved.
+
+```console
+podplane-operator sds --node-certificate=example.com,example.net
+```
+
+SDS checks that certificates are valid and cover the configured domains. Missing
+or invalid bundles prevent startup; invalid later updates leave the last valid
+certificate in use.
 
 ## Helm Chart
 
