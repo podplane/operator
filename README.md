@@ -96,6 +96,13 @@ objects. To allow it, set `allow_sync_to_kubernetes_secrets: true` in the operat
 config under `secrets` and annotate each permitted namespace with
 `secrets.podplane.dev/allow-sync-to-kubernetes-secrets: "true"`.
 
+With `rbac.namespace_group_bindings: true`, the operator keeps RoleBindings for the
+default Podplane groups (`podplane:managers` → `admin`, `podplane:operators` and
+`podplane:editors` → `edit`, `podplane:viewers` → `view`) in every tenant
+namespace: any namespace not prefixed `kube-` or `platform-` and not labelled
+`rbac.podplane.dev/restricted: "true"`. It manages only RoleBindings labelled
+`rbac.podplane.dev/managed: "true"`.
+
 The operator Helm chart also installs a default Kubernetes
 `ValidatingAdmissionPolicy` for Pods that use Secrets Store CSI volumes. Those
 Pods must set an explicit, non-empty `spec.serviceAccountName`, and every mounted

@@ -13,7 +13,9 @@ import (
 
 	"github.com/go-logr/logr"
 	certv1 "k8s.io/api/certificates/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	kubernetes "k8s.io/client-go/kubernetes"
@@ -83,8 +85,12 @@ func run() error {
 	utilruntime.Must(secretsv1beta1.AddToScheme(scheme))
 	restCfg := ctrl.GetConfigOrDie()
 	options := ctrl.Options{Scheme: scheme}
+	options.Cache.ByObject = map[client.Object]cache.ByObject{}
 	if cfg.Cluster.SPIFFE.TrustDomain != "" {
-		options.Cache.ByObject = map[client.Object]cache.ByObject{&certv1.PodCertificateRequest{}: {Field: fields.OneTermEqualSelector("spec.signerName", workloadpki.SignerName)}}
+		options.Cache.ByObject[&certv1.PodCertificateRequest{}] = cache.ByObject{Field: fields.OneTermEqualSelector("spec.signerName", workloadpki.SignerName)}
+	}
+	if cfg.RBAC.NamespaceGroupBindings {
+		options.Cache.ByObject[&rbacv1.RoleBinding{}] = cache.ByObject{Label: labels.SelectorFromSet(labels.Set{controllers.NamespaceGroupBindingLabel: "true"})}
 	}
 	mgr, err := ctrl.NewManager(restCfg, options)
 	if err != nil {
@@ -153,6 +159,11 @@ func run() error {
 	reconciler := &controllers.SecretProviderBindingReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Renderer: controllers.Renderer{ClusterID: cfg.Cluster.ID, Providers: providerMap, AllowSyncToKubernetesSecrets: cfg.Secrets.AllowSyncToKubernetesSecrets}}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return err
+	}
+	if cfg.RBAC.NamespaceGroupBindings {
+		if err := (&controllers.NamespaceGroupBindingsReconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
+			return err
+		}
 	}
 
 	keyRotation, err := cfg.KeyRotationDuration()

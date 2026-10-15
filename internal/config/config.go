@@ -22,6 +22,13 @@ type File struct {
 	Registry            Registry            `json:"registry"`
 	Certificates        Certificates        `json:"certificates,omitempty"`
 	IngressCertificates IngressCertificates `json:"ingress_certificates,omitempty"`
+	RBAC                RBAC                `json:"rbac,omitempty"`
+}
+
+// RBAC configures default access for Podplane groups.
+type RBAC struct {
+	// NamespaceGroupBindings grants default Podplane groups access to tenant namespaces.
+	NamespaceGroupBindings bool `json:"namespace_group_bindings,omitempty"`
 }
 
 // Cluster configures shared cluster identity.
