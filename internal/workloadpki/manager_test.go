@@ -28,9 +28,132 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
+
+func metricValue(t *testing.T, name string) float64 {
+	t.Helper()
+	families, err := metrics.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() == name {
+			metric := family.Metric[0]
+			if metric.Gauge != nil {
+				return metric.Gauge.GetValue()
+			}
+			return metric.Counter.GetValue()
+		}
+	}
+	t.Fatalf("metric %s not registered", name)
+	return 0
+}
+
+type failingListClient struct{ client.Client }
+
+func (c failingListClient) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return errors.New("cache unavailable")
+}
+
+func TestRequestBacklogMetrics(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := certv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
+	p := &certv1.PodCertificateRequest{ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "test", CreationTimestamp: metav1.NewTime(created)}, Spec: certv1.PodCertificateRequestSpec{SignerName: SignerName, StubPKCS10Request: csr}}
+	other := p.DeepCopy()
+	other.Name, other.Spec.SignerName = "other", "example.com/other"
+	terminal := p.DeepCopy()
+	terminal.Name = "terminal"
+	terminal.Status.Conditions = []metav1.Condition{{Type: "Denied", Status: metav1.ConditionTrue}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(p).WithObjects(p, other, terminal).Build()
+	m := &Manager{client: c}
+	check := func(count, timestamp, success float64) {
+		t.Helper()
+		for name, want := range map[string]float64{"pcr_pending": count, "pcr_oldest_pending_timestamp_seconds": timestamp, "pcr_collection_success": success} {
+			if got := metricValue(t, "podplane_workload_certificate_"+name); got != want {
+				t.Errorf("%s = %v, want %v", name, got, want)
+			}
+		}
+	}
+	m.collectRequests(ctx) // Existing objects after restart, without reconcile events.
+	check(1, float64(created.Unix()), 1)
+	r := &Reconciler{Client: c, Reader: c, Signer: m}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(p)}); err == nil {
+		t.Fatal("expected unavailable signer error")
+	}
+	m.collectRequests(ctx)
+	check(1, float64(created.Unix()), 1)
+	before := metricValue(t, "podplane_workload_certificate_pcr_collection_errors_total")
+	m.client = failingListClient{c}
+	m.collectRequests(ctx)
+	check(1, float64(created.Unix()), 0)
+	if metricValue(t, "podplane_workload_certificate_pcr_collection_errors_total") != before+1 {
+		t.Fatal("collection failure not counted")
+	}
+	m.client = c
+	for _, condition := range []string{"Issued", "Denied", "Failed"} {
+		p.Status.Conditions = []metav1.Condition{{Type: condition, Status: metav1.ConditionTrue}}
+		if err := c.Status().Update(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		m.collectRequests(ctx)
+		check(0, 0, 1)
+	}
+	p.Status.Conditions = nil
+	if err := c.Status().Update(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	m.collectRequests(ctx)
+	check(1, float64(created.Unix()), 1)
+	if err := c.Delete(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	m.collectRequests(ctx)
+	check(0, 0, 1)
+}
+
+func TestSignerReadinessMetric(t *testing.T) {
+	m := &Manager{}
+	for _, ready := range []bool{false, true, false, true} {
+		m.setReady(ready)
+		want := float64(0)
+		if ready {
+			want = 1
+		}
+		if (m.Ready(nil) == nil) != ready || metricValue(t, "podplane_workload_certificate_signer_ready") != want {
+			t.Fatal("readiness metric disagrees with Ready")
+		}
+	}
+	m.disableSigner()
+	if m.Ready(nil) == nil || metricValue(t, "podplane_workload_certificate_signer_ready") != 0 {
+		t.Fatal("disabled signer remains ready")
+	}
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	cert, err := newRoot(key, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.activate(key, cert, encodeRoots([]*x509.Certificate{cert}))
+	if m.Ready(nil) != nil || metricValue(t, "podplane_workload_certificate_signer_ready") != 1 {
+		t.Fatal("activated signer is not ready")
+	}
+	m.reconcileFailed()
+	if m.Ready(nil) == nil || metricValue(t, "podplane_workload_certificate_signer_ready") != 0 {
+		t.Fatal("failed reconciliation remains ready")
+	}
+}
 
 // TestServiceDNSNames verifies canonical Kubernetes Service identity derivation.
 func TestServiceDNSNames(t *testing.T) {

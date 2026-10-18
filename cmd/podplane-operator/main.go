@@ -23,6 +23,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	secretsv1beta1 "github.com/podplane/operator/api/v1beta1"
 	operatorconfig "github.com/podplane/operator/internal/config"
@@ -52,6 +53,7 @@ func run() error {
 	}
 	var (
 		cfgPath                  string
+		metricsAddr              string
 		servingNamespace         string
 		aggregatedAPIAddr        string
 		aggregatedAPICertFile    string
@@ -63,6 +65,7 @@ func run() error {
 		registryAuthServiceName  string
 	)
 	flag.StringVar(&cfgPath, "config", "/etc/podplane-operator/config.json", "operator JSON config")
+	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "HTTP metrics bind address (0 disables); restrict network access to trusted collectors")
 	flag.StringVar(&servingNamespace, "serving-namespace", "", "namespace containing operator serving Services")
 	flag.StringVar(&aggregatedAPIAddr, "aggregated-api-bind-address", ":8443", "HTTPS address for aggregated API traffic")
 	flag.StringVar(&aggregatedAPICertFile, "aggregated-api-tls-cert-file", "/var/run/podplane/tls/tls.crt", "TLS certificate file for the aggregated API endpoint")
@@ -84,7 +87,7 @@ func run() error {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(secretsv1beta1.AddToScheme(scheme))
 	restCfg := ctrl.GetConfigOrDie()
-	options := ctrl.Options{Scheme: scheme}
+	options := ctrl.Options{Scheme: scheme, Metrics: metricsserver.Options{BindAddress: metricsAddr}}
 	options.Cache.ByObject = map[client.Object]cache.ByObject{}
 	if cfg.Cluster.SPIFFE.TrustDomain != "" {
 		options.Cache.ByObject[&certv1.PodCertificateRequest{}] = cache.ByObject{Field: fields.OneTermEqualSelector("spec.signerName", workloadpki.SignerName)}

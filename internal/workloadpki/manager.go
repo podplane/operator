@@ -56,18 +56,22 @@ const (
 )
 
 var (
-	pcrTotal        = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "podplane_workload_certificate_pcr_reconciliations_total", Help: "Completed workload certificate reconciliations."}, []string{"result", "reason", "key_type", "mode"})
-	pcrPending      = prometheus.NewGauge(prometheus.GaugeOpts{Name: "podplane_workload_certificate_pcr_pending", Help: "Workload certificate reconciliations currently pending."})
-	statusConflicts = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_pcr_terminal_update_conflicts_total", Help: "Terminal PCR status update conflicts."})
-	caNotAfter      = prometheus.NewGauge(prometheus.GaugeOpts{Name: "podplane_workload_certificate_ca_not_after_seconds", Help: "Active workload CA expiry as Unix time."})
-	caLoadErrors    = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_ca_load_errors_total", Help: "Workload CA key load errors."})
-	bundleErrors    = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_trust_bundle_reconcile_errors_total", Help: "Trust bundle reconciliation errors."})
-	servingErrors   = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_serving_reconcile_errors_total", Help: "Operator serving certificate reconciliation errors."})
+	pcrTotal         = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "podplane_workload_certificate_pcr_reconciliations_total", Help: "Completed workload certificate reconciliations."}, []string{"result", "reason", "key_type", "mode"})
+	pcrPending       = prometheus.NewGauge(prometheus.GaugeOpts{Name: "podplane_workload_certificate_pcr_pending", Help: "Outstanding nonterminal requests for the workload signer."})
+	pcrOldest        = prometheus.NewGauge(prometheus.GaugeOpts{Name: "podplane_workload_certificate_pcr_oldest_pending_timestamp_seconds", Help: "Creation Unix timestamp of the oldest outstanding request, or zero."})
+	signerReady      = prometheus.NewGauge(prometheus.GaugeOpts{Name: "podplane_workload_certificate_signer_ready", Help: "Whether the workload signer Ready check succeeds."})
+	collectionOK     = prometheus.NewGauge(prometheus.GaugeOpts{Name: "podplane_workload_certificate_pcr_collection_success", Help: "Whether the last cached request collection succeeded."})
+	collectionErrors = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_pcr_collection_errors_total", Help: "Cached request collection failures."})
+	statusConflicts  = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_pcr_terminal_update_conflicts_total", Help: "Terminal PCR status update conflicts."})
+	caNotAfter       = prometheus.NewGauge(prometheus.GaugeOpts{Name: "podplane_workload_certificate_ca_not_after_seconds", Help: "Active workload CA expiry as Unix time."})
+	caLoadErrors     = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_ca_load_errors_total", Help: "Workload CA key load errors."})
+	bundleErrors     = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_trust_bundle_reconcile_errors_total", Help: "Trust bundle reconciliation errors."})
+	servingErrors    = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_serving_reconcile_errors_total", Help: "Operator serving certificate reconciliation errors."})
 )
 
 // init registers package defaults with their supporting libraries.
 func init() {
-	metrics.Registry.MustRegister(pcrTotal, pcrPending, statusConflicts, caNotAfter, caLoadErrors, bundleErrors, servingErrors)
+	metrics.Registry.MustRegister(pcrTotal, pcrPending, pcrOldest, signerReady, collectionOK, collectionErrors, statusConflicts, caNotAfter, caLoadErrors, bundleErrors, servingErrors)
 }
 
 var trustDomainRE = regexp.MustCompile(`^[a-z0-9._-]+$`)
@@ -157,6 +161,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
+		m.collectRequests(ctx)
 		m.reconcileCA(ctx)
 		if err := m.reconcileServing(); err != nil {
 			servingErrors.Inc()
@@ -168,6 +173,37 @@ func (m *Manager) Start(ctx context.Context) error {
 		case <-t.C:
 		}
 	}
+}
+
+// collectRequests samples the existing signer-filtered cache, never the API
+// reader. A bounded context makes cache startup/shutdown safe. Failed samples
+// retain the last known values and explicitly report their lack of freshness.
+func (m *Manager) collectRequests(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var requests certv1.PodCertificateRequestList
+	if err := m.client.List(ctx, &requests); err != nil {
+		collectionOK.Set(0)
+		collectionErrors.Inc()
+		return
+	}
+	count := 0
+	var oldest time.Time
+	for _, p := range requests.Items {
+		if p.Spec.SignerName != SignerName || isTerminal(&p) {
+			continue
+		}
+		count++
+		if oldest.IsZero() || p.CreationTimestamp.Time.Before(oldest) {
+			oldest = p.CreationTimestamp.Time
+		}
+	}
+	pcrPending.Set(float64(count))
+	pcrOldest.Set(0)
+	if !oldest.IsZero() {
+		pcrOldest.Set(float64(oldest.Unix()))
+	}
+	collectionOK.Set(1)
 }
 
 // Bundle returns a copy of the authoritative workload trust bundle.
@@ -370,6 +406,7 @@ func (m *Manager) activate(key ed25519.PrivateKey, cert *x509.Certificate, bundl
 	m.active = &signingPair{key: key, cert: cert, bundle: bundle}
 	m.canSign = true
 	m.ready = true
+	signerReady.Set(1)
 	caNotAfter.Set(float64(cert.NotAfter.Unix()))
 }
 
@@ -381,6 +418,7 @@ func (m *Manager) reconcileFailed() {
 		m.canSign = false
 	}
 	m.ready = false
+	signerReady.Set(0)
 }
 
 // disableSigner prevents issuance after authoritative state fails validation.
@@ -389,13 +427,22 @@ func (m *Manager) disableSigner() {
 	defer m.mu.Unlock()
 	m.canSign = false
 	m.ready = false
+	signerReady.Set(0)
 }
 
 // mustSPKI encodes a public key already accepted by certificate policy.
 func mustSPKI(k crypto.PublicKey) []byte { b, _ := x509.MarshalPKIXPublicKey(k); return b }
 
 // setReady updates the manager readiness state.
-func (m *Manager) setReady(v bool) { m.mu.Lock(); m.ready = v; m.mu.Unlock() }
+func (m *Manager) setReady(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ready = v
+	signerReady.Set(0)
+	if v {
+		signerReady.Set(1)
+	}
+}
 
 // isTerminal reports whether a request already has a terminal condition.
 func isTerminal(p *certv1.PodCertificateRequest) bool {
@@ -423,8 +470,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if p.Spec.SignerName != SignerName || isTerminal(&p) {
 		return ctrl.Result{}, nil
 	}
-	pcrPending.Inc()
-	defer pcrPending.Dec()
 	csr, reason, err := validateCSR(p.Spec.StubPKCS10Request)
 	if err != nil {
 		return ctrl.Result{}, r.deny(ctx, &p, reason, err.Error(), "", "")
@@ -535,9 +580,15 @@ func validateCSR(der []byte) (*x509.CertificateRequest, string, error) {
 func keyType(k any) string {
 	switch v := k.(type) {
 	case *rsa.PublicKey:
-		return fmt.Sprintf("RSA%d", v.N.BitLen())
+		if bits := v.N.BitLen(); bits == 3072 || bits == 4096 {
+			return fmt.Sprintf("RSA%d", bits)
+		}
+		return "unsupported"
 	case *ecdsa.PublicKey:
-		return fmt.Sprintf("ECDSAP%d", v.Curve.Params().BitSize)
+		if bits := v.Curve.Params().BitSize; bits == 256 || bits == 384 || bits == 521 {
+			return fmt.Sprintf("ECDSAP%d", bits)
+		}
+		return "unsupported"
 	case ed25519.PublicKey:
 		return "ED25519"
 	default:
