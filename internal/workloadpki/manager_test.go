@@ -24,10 +24,11 @@ import (
 	"time"
 
 	certv1 "k8s.io/api/certificates/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -190,9 +191,142 @@ func TestChangedCAKeyCannotPublishWhenBundleIsMissing(t *testing.T) {
 	if !m.ready || !m.active.key.Equal(first) {
 		t.Fatal("changed key displaced the last known-good signer")
 	}
-	if err := c.Get(ctx, types.NamespacedName{Name: BundleName}, &bundle); !apierrors.IsNotFound(err) {
-		t.Fatalf("changed key published a replacement trust bundle: %v", err)
+	if err := c.Get(ctx, types.NamespacedName{Name: BundleName}, &bundle); err != nil {
+		t.Fatalf("retained trust bundle was not restored: %v", err)
 	}
+	if bundle.Spec.TrustBundle != m.active.bundle {
+		t.Fatal("restored bundle differs from retained trust")
+	}
+}
+
+// TestAuthorizeRequiresSelectorLabelPresence distinguishes an absent label from an empty value.
+func TestAuthorizeRequiresSelectorLabelPresence(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		scheme := runtime.NewScheme()
+		if err := corev1.AddToScheme(scheme); err != nil {
+			t.Fatal(err)
+		}
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "ns", UID: "pod-uid"}}
+		if present {
+			pod.Labels = map[string]string{"selected": ""}
+		}
+		svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "ns"}, Spec: corev1.ServiceSpec{Selector: map[string]string{"selected": ""}}}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod, svc).Build()
+		r := &Reconciler{Reader: c}
+		p := &certv1.PodCertificateRequest{ObjectMeta: metav1.ObjectMeta{Namespace: "ns"}, Spec: certv1.PodCertificateRequestSpec{PodName: "pod", PodUID: "pod-uid"}}
+		_, err := r.authorize(context.Background(), p, "svc")
+		if (err == nil) != present {
+			t.Fatalf("present=%v: authorization error = %v", present, err)
+		}
+	}
+}
+
+// TestInvalidCandidateDoesNotSkipTrustValidation checks authoritative drift despite a bad CSI update.
+func TestInvalidCandidateDoesNotSkipTrustValidation(t *testing.T) {
+	for _, candidate := range []string{"missing", "malformed", "changed"} {
+		t.Run(candidate, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := runtime.NewScheme()
+			if err := certv1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).Build()
+			path := filepath.Join(t.TempDir(), "ca.pem")
+			first := writePKCS8Key(t, path)
+			m := &Manager{client: c, reader: c, cfg: Config{TrustDomain: "k8s.example", CAPath: path}}
+			m.reconcileCA(ctx)
+			switch candidate {
+			case "missing":
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			case "malformed":
+				if err := os.WriteFile(path, []byte("bad"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "changed":
+				writePKCS8Key(t, path)
+			}
+			m.reconcileCA(ctx)
+			if m.Ready(nil) != nil || !m.active.key.Equal(first) {
+				t.Fatal("candidate failure lost healthy retained signer")
+			}
+			var bundle certv1.ClusterTrustBundle
+			if err := c.Get(ctx, types.NamespacedName{Name: BundleName}, &bundle); err != nil {
+				t.Fatal(err)
+			}
+			bundle.Spec.TrustBundle = "invalid"
+			if err := c.Update(ctx, &bundle); err != nil {
+				t.Fatal(err)
+			}
+			m.reconcileCA(ctx)
+			if m.Ready(nil) == nil {
+				t.Fatal("invalid authoritative bundle left signer ready")
+			}
+			pub, _, _ := ed25519.GenerateKey(rand.Reader)
+			if _, err := m.sign(&certv1.PodCertificateRequest{}, pub, "service", nil); err == nil {
+				t.Fatal("issued despite invalid authoritative trust")
+			}
+		})
+	}
+}
+
+// TestRetainedSignerRenewsWithoutCandidate verifies renewal and outage readiness using the retained key.
+func TestRetainedSignerRenewsWithoutCandidate(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := certv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	key := writePKCS8Key(t, path)
+	root, err := newRoot(key, time.Now().AddDate(-9, -6, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := encodeRoots([]*x509.Certificate{root})
+	obj := &certv1.ClusterTrustBundle{ObjectMeta: metav1.ObjectMeta{Name: BundleName}, Spec: certv1.ClusterTrustBundleSpec{SignerName: SignerName, TrustBundle: bundle}}
+	if err := c.Create(ctx, obj); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{client: c, reader: c, cfg: Config{TrustDomain: "k8s.example", CAPath: path}, active: &signingPair{key: key, cert: root, bundle: bundle}, canSign: true, ready: true}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	m.reader = unavailableReader{Reader: c}
+	m.reconcileCA(ctx)
+	if m.Ready(nil) == nil || !m.canSign {
+		t.Fatal("API outage must mark unready while retaining valid issuance")
+	}
+	m.reader = c
+	m.reconcileCA(ctx)
+	if m.Ready(nil) != nil || !m.active.key.Equal(key) || !m.active.cert.NotAfter.After(root.NotAfter) {
+		t.Fatal("retained signer did not renew and recover")
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: BundleName}, obj); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := parseRoots(obj.Spec.TrustBundle)
+	if err != nil || len(roots) != 2 {
+		t.Fatalf("renewal did not retain overlapping roots: count=%d error=%v", len(roots), err)
+	}
+	if obj.Spec.TrustBundle != m.active.bundle {
+		t.Fatal("renewed signer activated before publication")
+	}
+	// Even during a later API outage, insufficient retained validity disables issuance.
+	m.active = &signingPair{key: key, cert: &x509.Certificate{NotAfter: time.Now().Add(time.Hour)}, bundle: bundle}
+	m.reader = unavailableReader{Reader: c}
+	m.reconcileCA(ctx)
+	if m.Ready(nil) == nil || m.canSign {
+		t.Fatal("insufficient retained validity allowed issuance")
+	}
+}
+
+type unavailableReader struct{ client.Reader }
+
+func (r unavailableReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	return errors.New("API unavailable")
 }
 
 // writePKCS8Key persists pkcs8 key with the required encoding and permissions.

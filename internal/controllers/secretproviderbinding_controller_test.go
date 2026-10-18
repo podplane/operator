@@ -47,7 +47,7 @@ func TestSecretProviderClassChangedIgnoresServerMetadata(t *testing.T) {
 	}
 }
 
-func TestRendererAddsOpenBaoCACertPath(t *testing.T) {
+func TestRendererVaultAuthentication(t *testing.T) {
 	binding := &secretsv1beta1.SecretProviderBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "hello", Namespace: "default"},
 		Spec: secretsv1beta1.SecretProviderBindingSpec{
@@ -55,19 +55,35 @@ func TestRendererAddsOpenBaoCACertPath(t *testing.T) {
 			Items:        []secretsv1beta1.SecretProviderBindingItem{{Key: "api-key"}},
 		},
 	}
-	renderer := Renderer{ClusterID: "default", Providers: map[string]ProviderConfig{
-		"local-fakevault": {Name: "local-fakevault", Kind: "openbao", Address: "https://10.0.2.15:19443/vault/default", CACert: "-----BEGIN CERTIFICATE-----\nlocal\n-----END CERTIFICATE-----"},
-	}}
-	spc, _, err := renderer.Render(binding)
-	if err != nil {
-		t.Fatalf("Render: %v", err)
-	}
-	params, ok, err := unstructured.NestedStringMap(spc.Object, "spec", "parameters")
-	if err != nil || !ok {
-		t.Fatalf("parameters = %v, %v", ok, err)
-	}
-	if got, want := params["baoCACertPath"], "/var/run/podplane/secrets-providers/local-fakevault/ca.crt"; got != want {
-		t.Fatalf("baoCACertPath = %q, want %q", got, want)
+	for _, provider := range []struct{ kind, prefix string }{{"vault", "vault"}, {"openbao", "bao"}} {
+		for _, auth := range []struct{ path, mount string }{
+			{"", "kubernetes"},
+			{"auth/k8s-jwt", "k8s-jwt"},
+			{"/auth/team/kubernetes/", "team/kubernetes"},
+		} {
+			t.Run(provider.kind+"/"+auth.mount, func(t *testing.T) {
+				renderer := Renderer{ClusterID: "default", Providers: map[string]ProviderConfig{
+					"local-fakevault": {Name: "local-fakevault", Kind: provider.kind, Address: "https://10.0.2.15:19443/vault/default", CACert: "-----BEGIN CERTIFICATE-----\nlocal\n-----END CERTIFICATE-----", AuthPath: auth.path},
+				}}
+				spc, _, err := renderer.Render(binding)
+				if err != nil {
+					t.Fatalf("Render: %v", err)
+				}
+				params, ok, err := unstructured.NestedStringMap(spc.Object, "spec", "parameters")
+				if err != nil || !ok {
+					t.Fatalf("parameters = %v, %v", ok, err)
+				}
+				if got, want := params[provider.prefix+"CACertPath"], "/var/run/podplane/secrets-providers/local-fakevault/ca.crt"; got != want {
+					t.Errorf("CA path = %q, want %q", got, want)
+				}
+				if got := params[provider.prefix+"AuthMountPath"]; got != auth.mount {
+					t.Errorf("auth mount = %q, want %q", got, auth.mount)
+				}
+				if params["roleName"] != binding.Name {
+					t.Errorf("role = %q, want binding role %q", params["roleName"], binding.Name)
+				}
+			})
+		}
 	}
 }
 

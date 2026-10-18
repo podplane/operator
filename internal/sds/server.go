@@ -210,7 +210,7 @@ func inline(value []byte) *corev3.DataSource {
 	return &corev3.DataSource{Specifier: &corev3.DataSource_InlineBytes{InlineBytes: value}}
 }
 
-// poll atomically publishes valid complete generations and retains last-known-good otherwise.
+// poll publishes each valid resource independently and retains failed resources.
 func poll(ctx context.Context, interval time.Duration, directory string, certificates certificateFlags, nodeDomains []string, cache *cachev3.LinearCache, current map[string][sha256.Size]byte) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -219,30 +219,24 @@ func poll(ctx context.Context, interval time.Duration, directory string, certifi
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			hashes, resources, err := load(directory, certificates, nodeDomains)
-			if err != nil {
-				slog.Warn("retaining last-known-good SDS resources", "error", err)
-				continue
+			for name, domain := range certificates {
+				// A node bundle remains one resource validated against every node
+				// domain; per-domain resources have independent update boundaries.
+				hashes, resources, err := load(directory, certificateFlags{name: domain}, nodeDomains)
+				if err != nil {
+					slog.Warn("retaining last-known-good SDS resource", "resource", name, "error", err)
+					continue
+				}
+				if current[name] == hashes[name] {
+					continue
+				}
+				if err := cache.UpdateResource(name, resources[name]); err != nil {
+					slog.Warn("update SDS resource failed", "resource", name, "error", err)
+					continue
+				}
+				current[name] = hashes[name]
+				slog.Info("published SDS certificate generation", "resource", name)
 			}
-			if equalHashes(current, hashes) {
-				continue
-			}
-			cache.SetResources(resources)
-			current = hashes
-			slog.Info("published SDS certificate generation", "resources", len(resources))
 		}
 	}
-}
-
-// equalHashes reports whether two complete file generations are identical.
-func equalHashes(a, b map[string][sha256.Size]byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for name, hash := range a {
-		if b[name] != hash {
-			return false
-		}
-	}
-	return true
 }

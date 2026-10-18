@@ -7,6 +7,7 @@ package secretsbackend
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
@@ -155,14 +156,34 @@ func (g *GCPSecretManagerBackend) List(ctx context.Context, ks Keyspace) ([]Entr
 	return out, nil
 }
 
-// Archive disables the latest secret version.
+// Archive disables all retained enabled versions, including latest. Keeping
+// history disabled makes an archived logical key eligible for permanent destroy.
+// Restore still enables only latest; historical selectors are not exposed.
 func (g *GCPSecretManagerBackend) Archive(ctx context.Context, ks Keyspace, key string) error {
 	id, err := ks.GCPSecretID(key)
 	if err != nil {
 		return err
 	}
-	_, err = g.client.DisableSecretVersion(ctx, &secretmanagerpb.DisableSecretVersionRequest{Name: g.versionName(id)})
-	return err
+	versions, err := g.retainedVersions(ctx, id)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, v := range versions {
+		switch v.State {
+		case secretmanagerpb.SecretVersion_ENABLED:
+			if _, err := g.client.DisableSecretVersion(ctx, &secretmanagerpb.DisableSecretVersionRequest{Name: v.Name}); err != nil {
+				return err
+			}
+			found = true
+		case secretmanagerpb.SecretVersion_DISABLED:
+			found = true
+		}
+	}
+	if !found {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ArchiveAll archives every key in a keyspace.
@@ -198,24 +219,20 @@ func (g *GCPSecretManagerBackend) Destroy(ctx context.Context, ks Keyspace, key 
 	if err != nil {
 		return err
 	}
-	vit := g.client.ListSecretVersions(ctx, &secretmanagerpb.ListSecretVersionsRequest{Parent: g.secretName(id)})
+	versions, err := g.retainedVersions(ctx, id)
+	if err != nil {
+		return err
+	}
+	// Preflight the complete listing (including every page) before destroying
+	// anything. An active key must leave all retained data unchanged.
+	for _, v := range versions {
+		if _, err := gcpDestroyVersion(v.State); err != nil {
+			return err
+		}
+	}
 	destroyed := false
-	for {
-		v, err := vit.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			if grpcstatus.Code(err) == codes.NotFound {
-				return ErrNotFound
-			}
-			return err
-		}
-		destroy, err := gcpDestroyVersion(v.State)
-		if err != nil {
-			return err
-		}
-		if !destroy {
+	for _, v := range versions {
+		if v.State != secretmanagerpb.SecretVersion_DISABLED {
 			continue
 		}
 		if _, err := g.client.DestroySecretVersion(ctx, &secretmanagerpb.DestroySecretVersionRequest{Name: v.Name}); err != nil {
@@ -227,6 +244,29 @@ func (g *GCPSecretManagerBackend) Destroy(ctx context.Context, ks Keyspace, key 
 		return ErrNotFound
 	}
 	return nil
+}
+
+// retainedVersions completes enumeration before callers mutate any versions.
+// Sorting makes mutation order independent of provider listing order; retries
+// skip versions that have already reached their target state.
+func (g *GCPSecretManagerBackend) retainedVersions(ctx context.Context, id string) ([]*secretmanagerpb.SecretVersion, error) {
+	vit := g.client.ListSecretVersions(ctx, &secretmanagerpb.ListSecretVersionsRequest{Parent: g.secretName(id)})
+	var versions []*secretmanagerpb.SecretVersion
+	for {
+		v, err := vit.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			if grpcstatus.Code(err) == codes.NotFound {
+				return nil, ErrNotFound
+			}
+			return nil, err
+		}
+		versions = append(versions, v)
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i].Name < versions[j].Name })
+	return versions, nil
 }
 
 // gcpDestroyVersion permits permanent destroy only for archived/disabled versions.

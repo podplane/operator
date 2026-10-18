@@ -12,7 +12,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -105,7 +104,6 @@ type Manager struct {
 	active  *signingPair
 	canSign bool
 	ready   bool
-	lastKey [32]byte
 }
 
 // signingPair is the active CA key, certificate, and published trust bundle.
@@ -250,29 +248,38 @@ func encodeRoots(cs []*x509.Certificate) string {
 // reconcileCA publishes and activates the CA represented by authoritative storage.
 func (m *Manager) reconcileCA(ctx context.Context) {
 	key, err := parseKeyFile(m.cfg.CAPath)
-	if err != nil {
-		caLoadErrors.Inc()
-		return
-	} // last-known-good
-	fp := sha256.Sum256(key.Public().(ed25519.PublicKey))
 	m.mu.RLock()
-	keyChanged := m.active != nil && m.lastKey != fp
+	active := m.active
 	m.mu.RUnlock()
-	if keyChanged {
-		// Automatic private-key replacement is forbidden. Keep serving with the
-		// last known-good pair and, critically, do not publish the candidate key.
+	if err != nil || (active != nil && !active.key.Equal(key)) {
+		// Reject the candidate, not reconciliation of the retained signer. Its
+		// trust publication, validity, and same-key renewal still need checking.
 		caLoadErrors.Inc()
-		return
+		if active == nil {
+			m.disableSigner()
+			return
+		}
+		key = active.key
 	}
 	var obj certv1.ClusterTrustBundle
 	err = m.reader.Get(ctx, types.NamespacedName{Name: BundleName}, &obj)
 	var roots []*x509.Certificate
 	if apierrors.IsNotFound(err) {
-		root, e := newRoot(key, time.Now())
-		if e != nil {
-			return
+		if active != nil {
+			// Restore the exact retained root set, not a new trust generation.
+			roots, err = parseRoots(active.bundle)
+			if err != nil {
+				m.disableSigner()
+				return
+			}
+		} else {
+			root, e := newRoot(key, time.Now())
+			if e != nil {
+				return
+			}
+			roots = []*x509.Certificate{root}
 		}
-		roots = []*x509.Certificate{root}
+		err = nil
 	} else if err != nil {
 		bundleErrors.Inc()
 		m.reconcileFailed()
@@ -353,15 +360,14 @@ func (m *Manager) reconcileCA(ctx context.Context) {
 		m.reconcileFailed()
 		return
 	}
-	m.activate(key, selected, bundle, fp)
+	m.activate(key, selected, bundle)
 }
 
 // activate replaces the active signer after its trust bundle is published.
-func (m *Manager) activate(key ed25519.PrivateKey, cert *x509.Certificate, bundle string, fingerprint [32]byte) {
+func (m *Manager) activate(key ed25519.PrivateKey, cert *x509.Certificate, bundle string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.active = &signingPair{key: key, cert: cert, bundle: bundle}
-	m.lastKey = fingerprint
 	m.canSign = true
 	m.ready = true
 	caNotAfter.Set(float64(cert.NotAfter.Unix()))
@@ -371,7 +377,7 @@ func (m *Manager) activate(key ed25519.PrivateKey, cert *x509.Certificate, bundl
 func (m *Manager) reconcileFailed() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.active == nil {
+	if m.active == nil || time.Now().Before(m.active.cert.NotBefore) || time.Until(m.active.cert.NotAfter) < maxLifetime+2*time.Minute {
 		m.canSign = false
 	}
 	m.ready = false
@@ -620,7 +626,7 @@ func (r *Reconciler) authorize(ctx context.Context, p *certv1.PodCertificateRequ
 		return nil, &denial{"ServiceDoesNotSelectPod", "service does not have an eligible selector"}
 	}
 	for k, v := range svc.Spec.Selector {
-		if pod.Labels[k] != v {
+		if value, present := pod.Labels[k]; !present || value != v {
 			return nil, &denial{"ServiceDoesNotSelectPod", "service does not select pod"}
 		}
 	}

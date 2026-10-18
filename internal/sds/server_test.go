@@ -137,6 +137,50 @@ func TestPollRetainsLastGoodRotation(t *testing.T) {
 	}
 }
 
+// TestPollIsolatesDomainFailures permits healthy rotations while retaining a failing resource.
+func TestPollIsolatesDomainFailures(t *testing.T) {
+	for _, failure := range []string{"missing", "malformed", "wrong domain"} {
+		t.Run(failure, func(t *testing.T) {
+			directory := t.TempDir()
+			flags := certificateFlags{"one": "example.com", "two": "example.net"}
+			writeBundle(t, directory, "one", certificateBundle(t, "example.com", 1))
+			writeBundle(t, directory, "two", certificateBundle(t, "example.net", 1))
+			hashes, resources, err := load(directory, flags, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cache := cachev3.NewLinearCache(resourcev3.SecretType)
+			cache.SetResources(resources)
+			first, retained := resourceKey(t, cache, "one"), resourceKey(t, cache, "two")
+			switch failure {
+			case "missing":
+				if err := os.Remove(filepath.Join(directory, "two")); err != nil {
+					t.Fatal(err)
+				}
+			case "malformed":
+				writeBundle(t, directory, "two", []byte("bad"))
+			case "wrong domain":
+				writeBundle(t, directory, "two", certificateBundle(t, "example.org", 2))
+			}
+			// The same mixed generation must still fail closed at startup.
+			if _, _, err := load(directory, flags, nil); err == nil {
+				t.Fatal("initial load accepted invalid configured resource")
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { defer close(done); poll(ctx, 5*time.Millisecond, directory, flags, nil, cache, hashes) }()
+			t.Cleanup(func() { cancel(); <-done })
+			writeBundle(t, directory, "one", certificateBundle(t, "example.com", 2))
+			waitFor(t, func() bool { return !bytes.Equal(resourceKey(t, cache, "one"), first) })
+			if !bytes.Equal(resourceKey(t, cache, "two"), retained) {
+				t.Fatal("failed resource was replaced")
+			}
+			writeBundle(t, directory, "two", certificateBundle(t, "example.net", 3))
+			waitFor(t, func() bool { return !bytes.Equal(resourceKey(t, cache, "two"), retained) })
+		})
+	}
+}
+
 // TestRunNodeCertificate serves a multi-domain Ed25519 bundle over the SDS socket.
 func TestRunNodeCertificate(t *testing.T) {
 	directory := t.TempDir()

@@ -151,7 +151,11 @@ func (r Renderer) parameters(p ProviderConfig, ks secretsbackend.Keyspace, bindi
 		if p.Kind == "openbao" {
 			prefix = "bao"
 		}
-		out := map[string]any{"objects": string(y)}
+		authPath := strings.Trim(p.AuthPath, "/")
+		if authPath == "" {
+			authPath = "auth/kubernetes"
+		}
+		out := map[string]any{"objects": string(y), prefix + "AuthMountPath": strings.TrimPrefix(authPath, "auth/")}
 		if p.Address != "" {
 			out[prefix+"Address"] = p.Address
 		}
