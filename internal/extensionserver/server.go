@@ -21,9 +21,8 @@ import (
 	kubernetes "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	basecompatibility "k8s.io/component-base/compatibility"
-	openapicommon "k8s.io/kube-openapi/pkg/common"
-	"k8s.io/kube-openapi/pkg/validation/spec"
 
+	"github.com/podplane/operator/internal/openapi"
 	"github.com/podplane/operator/internal/secretsapi"
 )
 
@@ -76,9 +75,8 @@ func (s *Server) Run(ctx context.Context, opts Options) error {
 	config.EffectiveVersion = basecompatibility.NewEffectiveVersionFromString("", "", "")
 	config.ExternalAddress = listener.Addr().String()
 	defNamer := apiopenapi.NewDefinitionNamer(scheme)
-	config.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(emptyOpenAPIDefinitions, defNamer)
-	config.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(emptyOpenAPIDefinitions, defNamer)
-	config.SkipOpenAPIInstallation = true
+	config.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(openapi.GetOpenAPIDefinitions, defNamer)
+	config.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(openapi.GetOpenAPIDefinitions, defNamer)
 	config.BuildHandlerChainFunc = func(apiHandler http.Handler, c *genericapiserver.Config) http.Handler {
 		withDeleteQuery := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := secretsapi.WithDeleteQuery(r.Context(), r.URL.Query().Get("key"), r.URL.Query().Get("destroy") == "true")
@@ -103,18 +101,4 @@ func (s *Server) Run(ctx context.Context, opts Options) error {
 		return err
 	}
 	return nil
-}
-
-// emptyOpenAPIDefinitions returns minimal OpenAPI schemas required by generic-apiserver installation.
-func emptyOpenAPIDefinitions(openapicommon.ReferenceCallback) map[string]openapicommon.OpenAPIDefinition {
-	objectSchema := spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"object"}}}
-	return map[string]openapicommon.OpenAPIDefinition{
-		"github.com/podplane/operator/internal/secretsapi.PublicKey":                  {Schema: objectSchema},
-		"github.com/podplane/operator/internal/secretsapi.SecretProviderKeyspace":     {Schema: objectSchema},
-		"github.com/podplane/operator/internal/secretsapi.SecretProviderKeyspaceList": {Schema: objectSchema},
-		"io.k8s.apimachinery.pkg.apis.meta.v1.DeleteOptions":                          {Schema: objectSchema},
-		"io.k8s.apimachinery.pkg.apis.meta.v1.GetOptions":                             {Schema: objectSchema},
-		"io.k8s.apimachinery.pkg.apis.meta.v1.Status":                                 {Schema: objectSchema},
-		"io.k8s.apimachinery.pkg.apis.meta.v1.UpdateOptions":                          {Schema: objectSchema},
-	}
 }

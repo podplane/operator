@@ -23,12 +23,34 @@ It owns the operator binary, and for the Podplane Secrets functionality it owns:
 - **Setup**: `make setup` — verify required tools and install git hooks.
 - **Format**: `make fmt` — run `go fmt ./...`.
 - **Lint**: `make lint` — run `golangci-lint run --timeout=5m`.
-- **Precommit**: `make precommit` — check gofmt output and run `go vet ./...`.
+- **Precommit**: `make precommit` — check the OpenAPI fingerprint, gofmt output,
+  and run `go vet ./...`.
 - **Test**: `make test` — run `go test ./...`.
 - **Build**: `make build` — build `bin/podplane-operator`.
 - **Clean**: `make clean` — remove `bin/`.
 - Focused package tests such as `go test ./internal/secretsbackend` are fine
   while iterating; run broader checks when touching shared API/controller paths.
+
+## Generated OpenAPI
+
+- `internal/secretsapi/types.go` owns the aggregated API types and their
+  `+k8s:openapi-gen` and type-level `+k8s:openapi-model-package` markers.
+  Keep model-package markers on API types, not the whole package: package-level
+  markers also generate methods for non-API types such as the key ring.
+- Run `make generate-openapi` (also included in `make generate`) after changing
+  API sources, dependencies, the generator configuration, or its boilerplate.
+  Include `internal/openapi/zz_generated.openapi.go`,
+  `internal/secretsapi/zz_generated.openapi_model_name.go`, and
+  `internal/openapi/zz_generated.openapi.sha256` with the change. Do not edit
+  generated files or refresh the fingerprint independently of generation.
+- `make check-openapi`, included in `make precommit`, is a fast, read-only
+  fingerprint check covering the Makefile, generator script, Go dependency
+  files, boilerplate, non-test secrets API Go files, and generated output.
+  It detects changed, added, or removed API files without running the generator.
+  CI additionally regenerates and compares output to verify reproducibility.
+- `internal/extensionserver` serves these schemas as OpenAPI v2 and v3.
+  Preserve generated model names and GVK metadata: kube-apiserver aggregation
+  and `kubectl explain` depend on them. Keep OpenAPI installation enabled.
 
 ## Architecture Constraints
 

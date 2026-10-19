@@ -20,6 +20,8 @@ const GroupVersion = "secrets-api.podplane.dev/v1beta1"
 const Algorithm = "x25519-hkdf-sha256-aes-256-gcm"
 
 // PublicKey is the aggregated API response for publickeys/latest.
+// +k8s:openapi-gen=true
+// +k8s:openapi-model-package=com.github.podplane.operator.internal.secretsapi
 type PublicKey struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
@@ -37,6 +39,8 @@ func (p *PublicKey) DeepCopyObject() runtime.Object {
 }
 
 // PublicKeySpec carries the current encryption public key.
+// +k8s:openapi-gen=true
+// +k8s:openapi-model-package=com.github.podplane.operator.internal.secretsapi
 type PublicKeySpec struct {
 	KeyID     string      `json:"keyID"`
 	CreatedAt metav1.Time `json:"createdAt"`
@@ -45,6 +49,8 @@ type PublicKeySpec struct {
 }
 
 // SecretProviderKeyspace is the aggregated API object for binding-scoped keys.
+// +k8s:openapi-gen=true
+// +k8s:openapi-model-package=com.github.podplane.operator.internal.secretsapi
 type SecretProviderKeyspace struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
@@ -77,6 +83,8 @@ func (s *SecretProviderKeyspace) DeepCopyObject() runtime.Object {
 }
 
 // SecretProviderKeyspaceList is a list of SecretProviderKeyspace objects.
+// +k8s:openapi-gen=true
+// +k8s:openapi-model-package=com.github.podplane.operator.internal.secretsapi
 type SecretProviderKeyspaceList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
@@ -98,11 +106,16 @@ func (s *SecretProviderKeyspaceList) DeepCopyObject() runtime.Object {
 }
 
 // SecretProviderKeyspaceSpec declares requested key operations.
+// +k8s:openapi-gen=true
+// +k8s:openapi-model-package=com.github.podplane.operator.internal.secretsapi
 type SecretProviderKeyspaceSpec struct {
+	// +listType=atomic
 	Entries []SecretProviderKeyspaceEntry `json:"entries"`
 }
 
 // SecretProviderKeyspaceEntry declares one key operation.
+// +k8s:openapi-gen=true
+// +k8s:openapi-model-package=com.github.podplane.operator.internal.secretsapi
 type SecretProviderKeyspaceEntry struct {
 	Key            string          `json:"key"`
 	Operation      string          `json:"operation"`
@@ -110,6 +123,8 @@ type SecretProviderKeyspaceEntry struct {
 }
 
 // EncryptedValue carries an encrypted secret value.
+// +k8s:openapi-gen=true
+// +k8s:openapi-model-package=com.github.podplane.operator.internal.secretsapi
 type EncryptedValue struct {
 	KeyID      string `json:"keyID"`
 	Algorithm  string `json:"algorithm"`
@@ -117,12 +132,17 @@ type EncryptedValue struct {
 }
 
 // SecretProviderKeyspaceStatus reports provider metadata and key states.
+// +k8s:openapi-gen=true
+// +k8s:openapi-model-package=com.github.podplane.operator.internal.secretsapi
 type SecretProviderKeyspaceStatus struct {
-	Provider string                              `json:"provider"`
-	Entries  []SecretProviderKeyspaceStatusEntry `json:"entries,omitempty"`
+	Provider string `json:"provider"`
+	// +listType=atomic
+	Entries []SecretProviderKeyspaceStatusEntry `json:"entries,omitempty"`
 }
 
 // SecretProviderKeyspaceStatusEntry reports one backend key state.
+// +k8s:openapi-gen=true
+// +k8s:openapi-model-package=com.github.podplane.operator.internal.secretsapi
 type SecretProviderKeyspaceStatusEntry struct {
 	Key          string       `json:"key"`
 	Status       string       `json:"status"`

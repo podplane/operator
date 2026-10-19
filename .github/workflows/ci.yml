@@ -28,6 +28,11 @@ jobs:
       - name: Precommit
         run: make precommit
 
+      - name: Check generated OpenAPI schemas
+        run: |
+          make generate-openapi
+          git diff --exit-code -- internal/openapi internal/secretsapi/zz_generated.openapi_model_name.go
+
       - name: Test
         run: make test
 

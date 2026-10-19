@@ -10,8 +10,9 @@ MAIN_PKG := ./cmd/podplane-operator
 IMAGE_REPOSITORY ?= ghcr.io/podplane/operator
 IMAGE_TAG ?= latest
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.18.0
+OPENAPI_GEN ?= go run k8s.io/kube-openapi/cmd/openapi-gen@v0.0.0-20260721132016-d427ff9ee9ad
 
-.PHONY: help setup fmt lint precommit test generate generate-crds generate-deepcopy build image clean
+.PHONY: help setup fmt lint precommit test generate generate-crds generate-deepcopy generate-openapi check-openapi build image clean
 
 help: ## Show available targets
 	@echo "Usage: make <target>"
@@ -34,7 +35,7 @@ lint: ## Run linters
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint is required but not installed"; exit 1; }
 	@golangci-lint run --timeout=5m
 
-precommit: ## Check formatting and run vet
+precommit: check-openapi ## Check generated OpenAPI, formatting, and vet
 	@echo "Checking formatting..."
 	@UNFORMATTED=$$(gofmt -l . 2>&1); \
 	if [ -n "$$UNFORMATTED" ]; then \
@@ -47,13 +48,30 @@ precommit: ## Check formatting and run vet
 test: ## Run tests
 	go test ./...
 
-generate: generate-crds generate-deepcopy ## Generate CRDs and generated Go code
+generate: generate-crds generate-deepcopy generate-openapi ## Generate CRDs and generated Go code
 
 generate-crds: ## Generate Kubernetes CRDs
 	$(CONTROLLER_GEN) crd:headerFile=config/boilerplate/crd.yaml.txt paths=./api/... output:crd:dir=config/crd/bases
 
 generate-deepcopy: ## Generate Kubernetes deepcopy code
 	$(CONTROLLER_GEN) object:headerFile=config/boilerplate/go.txt paths=./api/...
+
+generate-openapi: ## Generate aggregated API OpenAPI schemas
+	# Generate model names only for our API package, not the upstream packages.
+	$(OPENAPI_GEN) --output-dir=internal/openapi --output-pkg=github.com/podplane/operator/internal/openapi \
+		--output-file=zz_generated.openapi.go --output-model-name-file=zz_generated.openapi_model_name.go \
+		--go-header-file=config/boilerplate/go.txt github.com/podplane/operator/internal/secretsapi
+	$(OPENAPI_GEN) --output-dir=internal/openapi --output-pkg=github.com/podplane/operator/internal/openapi \
+		--output-file=zz_generated.openapi.go --go-header-file=config/boilerplate/go.txt \
+		github.com/podplane/operator/internal/secretsapi \
+		k8s.io/apimachinery/pkg/apis/meta/v1 k8s.io/apimachinery/pkg/runtime k8s.io/apimachinery/pkg/version
+	@sh scripts/openapi-fingerprint.sh > internal/openapi/zz_generated.openapi.sha256
+
+check-openapi: ## Check OpenAPI inputs and output without regenerating
+	@sh scripts/openapi-fingerprint.sh | diff -u internal/openapi/zz_generated.openapi.sha256 - || { \
+		echo "OpenAPI inputs or output changed; run 'make generate-openapi' and include the generated files."; \
+		exit 1; \
+	}
 
 build: ## Build the podplane-operator binary
 	mkdir -p $(BINDIR)
