@@ -47,6 +47,33 @@ func TestSecretProviderClassChangedIgnoresServerMetadata(t *testing.T) {
 	}
 }
 
+// TestRendererGoogleAuthentication checks that bindings use the shared provider
+// identity while deriving their resource paths from the Kubernetes keyspace.
+func TestRendererGoogleAuthentication(t *testing.T) {
+	r := Renderer{ClusterID: "fallback", Providers: map[string]ProviderConfig{
+		"google": {Name: "google", Kind: "gcp", ProjectID: "123", KeyPrefix: "cluster"},
+	}}
+	binding := &secretsv1beta1.SecretProviderBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "team-a"},
+		Spec:       secretsv1beta1.SecretProviderBindingSpec{ProviderName: "google", Items: []secretsv1beta1.SecretProviderBindingItem{{Key: "password", Path: "database/password"}}},
+	}
+	spc, _, err := r.Render(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, _, err := unstructured.NestedStringMap(spc.Object, "spec", "parameters")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["auth"] != "provider-adc" || !strings.Contains(params["secrets"], "projects/123/secrets/cluster_team-a_api_password/versions/latest") || !strings.Contains(params["secrets"], "database/password") {
+		t.Fatalf("incorrect shared-provider authentication or secret path: %v", params)
+	}
+	binding.Spec.Items[0].Key = "../other"
+	if _, _, err := r.Render(binding); err == nil {
+		t.Fatal("accepted a keyspace escape")
+	}
+}
+
 func TestRendererVaultAuthentication(t *testing.T) {
 	binding := &secretsv1beta1.SecretProviderBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "hello", Namespace: "default"},

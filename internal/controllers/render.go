@@ -128,7 +128,7 @@ func (r Renderer) parameters(p ProviderConfig, ks secretsbackend.Keyspace, bindi
 			rows = append(rows, map[string]string{"resourceName": rn, "path": mp})
 		}
 		y, _ := yaml.Marshal(rows)
-		return map[string]any{"secrets": string(y)}, nil
+		return map[string]any{"auth": "provider-adc", "secrets": string(y)}, nil
 	case "vault", "openbao":
 		mount := strings.Trim(p.MountPath, "/")
 		if mount == "" {

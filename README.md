@@ -73,6 +73,12 @@ issuer and uses `cluster.oidc.client_id` as the audience, defaulting it to
 `ca_cert`, `auth_path`, or `operator_role`. Secret material must not be placed
 inline.
 
+Google Secret Manager bindings use `auth: provider-adc`: the CSI provider reads
+through its own cluster-scoped identity, while the operator uses a separate identity
+for secret lifecycle operations. Applications are authorized through Kubernetes
+bindings, not per-workload Google IAM. Raw SecretProviderClasses remain an
+administrator escape hatch, enforced by the components chart's admission policy.
+
 Vault/OpenBao providers authenticate with Kubernetes/JWT auth. The operator uses
 its own pod service account token, logs in at `auth_path` (default
 `auth/kubernetes`), and requests `operator_role` (default `podplane-operator`). Workload
