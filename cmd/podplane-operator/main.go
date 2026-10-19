@@ -30,7 +30,6 @@ import (
 	"github.com/podplane/operator/internal/controllers"
 	"github.com/podplane/operator/internal/extensionserver"
 	"github.com/podplane/operator/internal/ingresspki"
-	"github.com/podplane/operator/internal/registryauth"
 	"github.com/podplane/operator/internal/sds"
 	"github.com/podplane/operator/internal/secretsapi"
 	"github.com/podplane/operator/internal/secretsbackend"
@@ -59,10 +58,6 @@ func run() error {
 		aggregatedAPICertFile    string
 		aggregatedAPIKeyFile     string
 		aggregatedAPIServiceName string
-		registryAuthAddr         string
-		registryAuthCertFile     string
-		registryAuthKeyFile      string
-		registryAuthServiceName  string
 	)
 	flag.StringVar(&cfgPath, "config", "/etc/podplane-operator/config.json", "operator JSON config")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "HTTP metrics bind address (0 disables); restrict network access to trusted collectors")
@@ -71,10 +66,6 @@ func run() error {
 	flag.StringVar(&aggregatedAPICertFile, "aggregated-api-tls-cert-file", "/var/run/podplane/tls/tls.crt", "TLS certificate file for the aggregated API endpoint")
 	flag.StringVar(&aggregatedAPIKeyFile, "aggregated-api-tls-private-key-file", "/var/run/podplane/tls/tls.key", "TLS private key file for the aggregated API endpoint")
 	flag.StringVar(&aggregatedAPIServiceName, "aggregated-api-service-name", "", "Service name for the operator-issued aggregated API certificate")
-	flag.StringVar(&registryAuthAddr, "registry-auth-bind-address", ":9443", "HTTPS address for optional Docker registry auth endpoint")
-	flag.StringVar(&registryAuthCertFile, "registry-auth-tls-cert-file", "/var/run/podplane/registry-auth-tls/tls.crt", "TLS certificate file for the registry auth endpoint")
-	flag.StringVar(&registryAuthKeyFile, "registry-auth-tls-private-key-file", "/var/run/podplane/registry-auth-tls/tls.key", "TLS private key file for the registry auth endpoint")
-	flag.StringVar(&registryAuthServiceName, "registry-auth-service-name", "", "Service name for the operator-issued registry auth certificate")
 	flag.Parse()
 
 	ctx := ctrl.SetupSignalHandler()
@@ -105,9 +96,6 @@ func run() error {
 			caPath = "/var/run/podplane/certificates/workload-ca-key"
 		}
 		serving := []workloadpki.ServingCertificate{{Name: "aggregated-api", CertFile: aggregatedAPICertFile, KeyFile: aggregatedAPIKeyFile, DNSNames: workloadpki.ServiceDNSNames(aggregatedAPIServiceName, servingNamespace)}}
-		if cfg.Registry.Auth.Enabled {
-			serving = append(serving, workloadpki.ServingCertificate{Name: "registry-auth", CertFile: registryAuthCertFile, KeyFile: registryAuthKeyFile, DNSNames: workloadpki.ServiceDNSNames(registryAuthServiceName, servingNamespace)})
-		}
 		signer, err := workloadpki.NewManager(mgr.GetClient(), mgr.GetAPIReader(), workloadpki.Config{TrustDomain: cfg.Cluster.SPIFFE.TrustDomain, CAPath: caPath, Serving: serving})
 		if err != nil {
 			return err
@@ -189,12 +177,6 @@ func run() error {
 	extensions := &extensionserver.Server{Kube: kube, Secrets: keyspaces, KeyStore: publicKeys}
 	if err := extensions.Run(ctx, extensionserver.Options{Addr: aggregatedAPIAddr, CertFile: aggregatedAPICertFile, KeyFile: aggregatedAPIKeyFile, RestConfig: restCfg}); err != nil {
 		return err
-	}
-	if cfg.Registry.Auth.Enabled {
-		validator := &registryauth.Validator{IssuerURL: cfg.Cluster.OIDC.IssuerURL, Audience: cfg.Cluster.OIDC.ClientID}
-		if err := (&registryauth.Server{Validator: validator}).Run(ctx, registryauth.Options{Addr: registryAuthAddr, CertFile: registryAuthCertFile, KeyFile: registryAuthKeyFile}); err != nil {
-			return err
-		}
 	}
 	slog.Info("starting controller manager")
 	return mgr.Start(ctx)

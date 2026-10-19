@@ -19,7 +19,6 @@ import (
 type File struct {
 	Cluster             Cluster             `json:"cluster"`
 	Secrets             Secrets             `json:"secrets"`
-	Registry            Registry            `json:"registry"`
 	Certificates        Certificates        `json:"certificates,omitempty"`
 	IngressCertificates IngressCertificates `json:"ingress_certificates,omitempty"`
 	RBAC                RBAC                `json:"rbac,omitempty"`
@@ -93,16 +92,6 @@ type IngressDNSProvider struct {
 	RoleARN      string `json:"role_arn,omitempty"`
 }
 
-// Registry configures the Podplane registry module.
-type Registry struct {
-	Auth RegistryAuth `json:"auth,omitempty"`
-}
-
-// RegistryAuth configures optional Docker-compatible registry authorization.
-type RegistryAuth struct {
-	Enabled bool `json:"enabled,omitempty"`
-}
-
 // Load reads and normalizes an operator configuration file.
 func Load(path string) (File, error) {
 	b, err := os.ReadFile(path)
@@ -124,14 +113,6 @@ func Load(path string) (File, error) {
 	}
 	if _, err := f.KeyRotationDuration(); err != nil {
 		return File{}, err
-	}
-	if f.Registry.Auth.Enabled {
-		if f.Cluster.ID == "" {
-			return File{}, fmt.Errorf("cluster.id is required when registry auth is enabled")
-		}
-		if f.Cluster.OIDC.IssuerURL == "" {
-			return File{}, fmt.Errorf("cluster.oidc.issuer_url is required when registry auth is enabled")
-		}
 	}
 	names := make([]string, 0, len(f.Secrets.Providers))
 	for name := range f.Secrets.Providers {

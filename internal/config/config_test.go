@@ -55,10 +55,10 @@ func TestLoadDefaultsKeyRotation(t *testing.T) {
 	}
 }
 
-// TestLoadDefaultsRegistryAuthAudience verifies registry auth uses cluster OIDC client_id as audience.
-func TestLoadDefaultsRegistryAuthAudience(t *testing.T) {
+// TestLoadDefaultsOIDCClientID verifies the OIDC client ID defaults to the cluster ID.
+func TestLoadDefaultsOIDCClientID(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"cluster":{"id":"test-cluster","oidc":{"issuer_url":"https://issuer.example"}},"secrets":{"providers":{}},"registry":{"auth":{"enabled":true}}}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"cluster":{"id":"test-cluster","oidc":{"issuer_url":"https://issuer.example"}},"secrets":{"providers":{}}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
@@ -67,17 +67,6 @@ func TestLoadDefaultsRegistryAuthAudience(t *testing.T) {
 	}
 	if got, want := cfg.Cluster.OIDC.ClientID, "test-cluster"; got != want {
 		t.Fatalf("Cluster.OIDC.ClientID = %q, want %q", got, want)
-	}
-}
-
-// TestLoadRequiresRegistryAuthIssuer verifies enabled registry auth validates its issuer config.
-func TestLoadRequiresRegistryAuthIssuer(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"cluster":{"id":"test-cluster"},"secrets":{"providers":{}},"registry":{"auth":{"enabled":true}}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("Load succeeded, want missing issuer error")
 	}
 }
 

@@ -85,14 +85,7 @@ its own pod service account token, logs in at `auth_path` (default
 CSI mounts authenticate separately as the workload pod service account using the
 generated `SecretProviderClass` `roleName`.
 
-Registry auth is HTTPS-only and is intended for registry ingress `/token`
-routing. Configure its bind address and serving certificate with
-`--registry-auth-bind-address`, `--registry-auth-tls-cert-file`, and
-`--registry-auth-tls-private-key-file`. The Helm chart should issue and mount a
-service DNS certificate and configure Traefik/Gateway backend TLS trust in the
-same style as Podplane web template workloads.
-
-The aggregated API endpoint uses matching serving flags:
+The aggregated API endpoint uses HTTPS. Configure its serving address and certificate with
 `--aggregated-api-bind-address`, `--aggregated-api-tls-cert-file`, and
 `--aggregated-api-tls-private-key-file`.
 
