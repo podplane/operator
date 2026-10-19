@@ -16,7 +16,6 @@ The Podplane Operator provides features which improve the PaaS developer experie
   and renewal, with certificate bundles stored in external secrets providers.
 - **Envoy SDS:** certificate delivery and live reload for secrets-backed
   per-domain or node-local ingress certificates.
-- **Registry authentication:** an OIDC-backed Docker registry token service.
 
 ## Configuration
 
@@ -55,20 +54,15 @@ Example:
         "region": "us-east-1"
       }
     }
-  },
-  "registry": {
-    "auth": {
-      "enabled": true
-    }
   }
 }
 ```
 
 `cluster.id` identifies the Podplane cluster. The backend path prefix defaults
-to `cluster.id`. `cluster.oidc` is shared module identity configuration; the
-registry token service validates Docker refresh-token exchanges against that
-issuer and uses `cluster.oidc.client_id` as the audience, defaulting it to
-`cluster.id` when omitted. Each secrets provider has safe fields such as `kind`,
+to `cluster.id`. `cluster.oidc` holds the cluster's OIDC settings;
+`cluster.oidc.client_id` defaults to `cluster.id` when omitted. Zot receives its
+OIDC configuration separately through the registry chart.
+Each secrets provider has safe fields such as `kind`,
 `object_type`, `region`, `project_id`, `location`, `address`, `mount_path`,
 `ca_cert`, `auth_path`, or `operator_role`. Secret material must not be placed
 inline.
@@ -102,7 +96,7 @@ namespace: any namespace not prefixed `kube-` or `platform-` and not labelled
 `rbac.podplane.dev/restricted: "true"`. It manages only RoleBindings labelled
 `rbac.podplane.dev/managed: "true"`.
 
-The operator Helm chart also installs a default Kubernetes
+The components repository's `platform-rbac` chart installs a default Kubernetes
 `ValidatingAdmissionPolicy` for Pods that use Secrets Store CSI volumes. Those
 Pods must set an explicit, non-empty `spec.serviceAccountName`, and every mounted
 Secrets Store CSI `secretProviderClass` must equal that service account name.
