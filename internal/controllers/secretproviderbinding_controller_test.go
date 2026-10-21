@@ -11,12 +11,135 @@ import (
 
 	secretsv1beta1 "github.com/podplane/operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestBindingProviderInheritance(t *testing.T) {
+	for _, explicit := range []string{"", "aws-store"} {
+		t.Run("provider="+explicit, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := secretsv1beta1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			binding := &secretsv1beta1.SecretProviderBinding{
+				ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "team-a", UID: types.UID("binding-uid")},
+				Spec: secretsv1beta1.SecretProviderBindingSpec{
+					ProviderName: explicit,
+					Items:        []secretsv1beta1.SecretProviderBindingItem{{Key: "password"}},
+				},
+			}
+			r := &SecretProviderBindingReconciler{
+				Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(binding).WithObjects(binding).Build(),
+				Renderer: Renderer{ClusterID: "cluster", Providers: map[string]ProviderConfig{
+					"aws-store":    {Name: "aws-store", Kind: "aws"},
+					"google-store": {Name: "google-store", Kind: "gcp", ProjectID: "project"},
+				}},
+			}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: binding.Namespace, Name: binding.Name}}
+			for _, defaultProvider := range []string{"aws-store", "google-store", "aws-store"} {
+				r.Renderer.DefaultProvider = defaultProvider
+				if _, err := r.Reconcile(context.Background(), request); err != nil {
+					t.Fatal(err)
+				}
+				var got secretsv1beta1.SecretProviderBinding
+				if err := r.Get(context.Background(), request.NamespacedName, &got); err != nil {
+					t.Fatal(err)
+				}
+				if !apiequality.Semantic.DeepEqual(got.Spec, binding.Spec) {
+					t.Fatalf("reconciliation changed binding spec: %+v", got.Spec)
+				}
+				wantName := explicit
+				if wantName == "" {
+					wantName = defaultProvider
+				}
+				wantKind := "aws"
+				if wantName == "google-store" {
+					wantKind = "gcp"
+				}
+				if got.Status.Provider.Name != wantName || got.Status.Provider.Kind != wantKind || !apiMeta.IsStatusConditionTrue(got.Status.Conditions, "Ready") {
+					t.Fatalf("default %q: incorrect binding status: %+v", defaultProvider, got.Status)
+				}
+				spc := secretProviderClassObject()
+				if err := r.Get(context.Background(), request.NamespacedName, spc); err != nil {
+					t.Fatal(err)
+				}
+				if kind, _, _ := unstructured.NestedString(spc.Object, "spec", "provider"); kind != wantKind {
+					t.Fatalf("default %q: generated provider = %q, want %q", defaultProvider, kind, wantKind)
+				}
+			}
+		})
+	}
+}
+
+func TestBindingProviderResolutionErrors(t *testing.T) {
+	for _, tc := range []struct{ name, explicit, defaultProvider, wantError string }{
+		{"missing default", "", "", "no default secrets provider"},
+		{"unknown default", "", "missing", `unknown provider "missing"`},
+		{"invalid default", "", "not/a/provider", `unknown provider "not/a/provider"`},
+		{"unknown explicit does not fall back", "missing", "aws-store", `unknown provider "missing"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := secretsv1beta1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			binding := &secretsv1beta1.SecretProviderBinding{
+				ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "team-a"},
+				Spec: secretsv1beta1.SecretProviderBindingSpec{
+					ProviderName: tc.explicit,
+					Items:        []secretsv1beta1.SecretProviderBindingItem{{Key: "password"}},
+				},
+			}
+			r := &SecretProviderBindingReconciler{
+				Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(binding).WithObjects(binding).Build(),
+				Renderer: Renderer{ClusterID: "cluster", DefaultProvider: tc.defaultProvider, Providers: map[string]ProviderConfig{
+					"aws-store": {Name: "aws-store", Kind: "aws"},
+				}},
+			}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: binding.Namespace, Name: binding.Name}}
+			if _, err := r.Reconcile(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			var got secretsv1beta1.SecretProviderBinding
+			if err := r.Get(context.Background(), request.NamespacedName, &got); err != nil {
+				t.Fatal(err)
+			}
+			condition := apiMeta.FindStatusCondition(got.Status.Conditions, "Ready")
+			if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "Invalid" || !strings.Contains(condition.Message, tc.wantError) {
+				t.Fatalf("incorrect provider resolution condition: %+v", condition)
+			}
+			if err := r.Get(context.Background(), request.NamespacedName, secretProviderClassObject()); !apierrors.IsNotFound(err) {
+				t.Fatalf("provider resolution failure should not create a SecretProviderClass: %v", err)
+			}
+			existing := secretProviderClassObject()
+			existing.SetName(binding.Name)
+			existing.SetNamespace(binding.Namespace)
+			existing.Object["spec"] = map[string]any{"provider": "vault", "parameters": map[string]any{"objects": "previous"}}
+			existing.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: secretsv1beta1.GroupVersion.String(), Kind: "SecretProviderBinding", Name: binding.Name, UID: binding.UID, Controller: ptr(true)}})
+			if err := r.Create(context.Background(), existing); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Reconcile(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			gotClass := secretProviderClassObject()
+			if err := r.Get(context.Background(), request.NamespacedName, gotClass); err != nil {
+				t.Fatal(err)
+			}
+			if !apiequality.Semantic.DeepEqual(gotClass.Object, existing.Object) {
+				t.Fatal("provider resolution failure changed the existing SecretProviderClass")
+			}
+		})
+	}
+}
 
 func TestSecretProviderClassChangedIgnoresServerMetadata(t *testing.T) {
 	binding := &secretsv1beta1.SecretProviderBinding{ObjectMeta: metav1.ObjectMeta{Name: "binding", Namespace: "namespace", UID: types.UID("uid")}}

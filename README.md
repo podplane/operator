@@ -39,6 +39,7 @@ Example:
   "secrets": {
     "allow_sync_to_kubernetes_secrets": false,
     "key_rotation": "6h",
+    "default_provider": "openbao-local",
     "providers": {
       "openbao-local": {
         "kind": "openbao",
@@ -66,6 +67,15 @@ Each secrets provider has safe fields such as `kind`,
 `object_type`, `region`, `project_id`, `location`, `address`, `mount_path`,
 `ca_cert`, `auth_path`, or `operator_role`. Secret material must not be placed
 inline.
+
+Bindings may omit `spec.providerName` to follow `secrets.default_provider` on every
+reconciliation. Explicit names stay pinned to that provider. The resolved name and
+kind appear in `status.provider`; the operator never writes the default into the
+binding spec. A missing default or unknown selected provider reports `Ready=False`
+without changing an existing generated `SecretProviderClass`. Configuration is
+loaded at startup, so propagate default changes and restart the operator to
+reconcile existing bindings. This changes routing, not stored values; copy keys
+and verify workload remounts before retiring the previous backend.
 
 Google Secret Manager bindings use `auth: provider-adc`: the CSI provider reads
 through its own cluster-scoped identity, while the operator uses a separate identity

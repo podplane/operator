@@ -33,15 +33,23 @@ var SecretProviderClassGVK = schema.GroupVersionKind{Group: "secrets-store.csi.x
 // Renderer builds SecretProviderClass objects from SecretProviderBinding resources.
 type Renderer struct {
 	ClusterID                    string
+	DefaultProvider              string
 	Providers                    map[string]ProviderConfig
 	AllowSyncToKubernetesSecrets bool
 }
 
 // Render returns the desired SecretProviderClass and binding status.
 func (r Renderer) Render(binding *secretsv1beta1.SecretProviderBinding) (*unstructured.Unstructured, secretsv1beta1.SecretProviderBindingStatus, error) {
-	provider, ok := r.Providers[binding.Spec.ProviderName]
+	providerName := binding.Spec.ProviderName
+	if providerName == "" {
+		providerName = r.DefaultProvider
+		if providerName == "" {
+			return nil, secretsv1beta1.SecretProviderBindingStatus{}, fmt.Errorf("spec.providerName is omitted and no default secrets provider is configured")
+		}
+	}
+	provider, ok := r.Providers[providerName]
 	if !ok {
-		return nil, secretsv1beta1.SecretProviderBindingStatus{}, fmt.Errorf("unknown provider %q", binding.Spec.ProviderName)
+		return nil, secretsv1beta1.SecretProviderBindingStatus{}, fmt.Errorf("unknown provider %q", providerName)
 	}
 	ks := secretsbackend.Keyspace{ProviderName: provider.Name, Namespace: binding.Namespace, BindingName: binding.Name, Prefix: providerKeyPrefix(r.ClusterID, provider)}
 	items := make([]secretsv1beta1.SecretProviderBindingItemStatus, 0, len(binding.Spec.Items))

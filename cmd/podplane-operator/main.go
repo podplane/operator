@@ -147,7 +147,7 @@ func run() error {
 		return err
 	}
 
-	reconciler := &controllers.SecretProviderBindingReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Renderer: controllers.Renderer{ClusterID: cfg.Cluster.ID, Providers: providerMap, AllowSyncToKubernetesSecrets: cfg.Secrets.AllowSyncToKubernetesSecrets}}
+	reconciler := &controllers.SecretProviderBindingReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Renderer: controllers.Renderer{ClusterID: cfg.Cluster.ID, DefaultProvider: cfg.Secrets.DefaultProvider, Providers: providerMap, AllowSyncToKubernetesSecrets: cfg.Secrets.AllowSyncToKubernetesSecrets}}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return err
 	}

@@ -9,10 +9,13 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 // SecretProviderBindingSpec declares which backend keys a workload can mount.
 type SecretProviderBindingSpec struct {
 	// ProviderName is the cluster-local provider name from Podplane cluster config.
+	// When omitted, the binding follows the current cluster default provider.
+	// An explicit name pins the binding to that provider.
+	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
-	ProviderName string `json:"providerName"`
+	ProviderName string `json:"providerName,omitempty"`
 
 	// MountPath is the absolute workload mount path used by Podplane templates; it is not used for backend path generation.
 	// +kubebuilder:validation:Optional
@@ -115,7 +118,7 @@ type SecretProviderBindingStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=spb
-// +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.providerName`
+// +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.status.provider.name`
 // +kubebuilder:printcolumn:name="SecretProviderClass",type=string,JSONPath=`.status.secretProviderClass.name`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
