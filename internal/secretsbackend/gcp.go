@@ -64,18 +64,27 @@ func (g *GCPSecretManagerBackend) Create(ctx context.Context, ks Keyspace, key s
 		return Entry{}, err
 	}
 	_, err = g.client.CreateSecret(ctx, &secretmanagerpb.CreateSecretRequest{Parent: g.parent(), SecretId: id, Secret: &secretmanagerpb.Secret{Replication: &secretmanagerpb.Replication{Replication: &secretmanagerpb.Replication_Automatic_{Automatic: &secretmanagerpb.Replication_Automatic{}}}, Labels: map[string]string{"podplane-cluster-prefix": ks.Prefix, "podplane-namespace": ks.Namespace, "podplane-binding": ks.BindingName}}})
-	if err != nil && !strings.Contains(err.Error(), "AlreadyExists") {
+	if err != nil && grpcstatus.Code(err) != codes.AlreadyExists {
 		return Entry{}, err
 	}
-	if strings.Contains(fmt.Sprint(err), "AlreadyExists") {
+	if err != nil {
 		state, exists, statusErr := g.latestSecretVersionState(ctx, id)
-		if statusErr == nil && state == secretmanagerpb.SecretVersion_DISABLED {
+		if statusErr != nil {
+			return Entry{}, statusErr
+		}
+		if !exists {
+			return Entry{}, fmt.Errorf("%w: secret %q is awaiting initialization; wait for its creator or stop its writers before administrative recovery", ErrAlreadyExists, key)
+		}
+		if state == secretmanagerpb.SecretVersion_DISABLED {
 			return Entry{}, ArchivedError(key)
 		}
-		if statusErr != nil || exists && state == secretmanagerpb.SecretVersion_ENABLED {
-			return Entry{}, ErrAlreadyExists
+		if state == secretmanagerpb.SecretVersion_DESTROYED {
+			return Entry{}, fmt.Errorf("%w: secret %q retains destroyed history; explicitly destroy the secret before recreating it", ErrAlreadyExists, key)
 		}
+		return Entry{}, ErrAlreadyExists
 	}
+	// Only the creator of the secret object may initialize it. In particular,
+	// an empty existing object may belong to a creator still adding its version.
 	_, err = g.client.AddSecretVersion(ctx, &secretmanagerpb.AddSecretVersionRequest{Parent: g.secretName(id), Payload: &secretmanagerpb.SecretPayload{Data: value}})
 	if err != nil {
 		return Entry{}, err
@@ -219,15 +228,30 @@ func (g *GCPSecretManagerBackend) Restore(ctx context.Context, ks Keyspace, key 
 	return Entry{Key: key, Status: StatusActive, BackendPath: id}, nil
 }
 
-// Destroy permanently destroys retained versions of a Google Secret Manager secret.
+// Destroy removes archived versions and their secret object so creation can start
+// afresh. ETags fence stale object deletion and version restoration, but not new
+// version additions; callers must stop and drain other writers before destroying.
 func (g *GCPSecretManagerBackend) Destroy(ctx context.Context, ks Keyspace, key string) error {
 	id, err := ks.GCPSecretID(key)
 	if err != nil {
 		return err
 	}
+	secret, err := g.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: g.secretName(id)})
+	if err != nil {
+		if grpcstatus.Code(err) == codes.NotFound {
+			return ErrNotFound
+		}
+		return err
+	}
+	if secret.Etag == "" {
+		return fmt.Errorf("cannot safely destroy secret %q without its ETag", key)
+	}
 	versions, err := g.retainedVersions(ctx, id)
 	if err != nil {
 		return err
+	}
+	if len(versions) == 0 {
+		return fmt.Errorf("secret %q has no versions and may still be initializing; stop its writers before administrative recovery", key)
 	}
 	// Preflight the complete listing (including every page) before destroying
 	// anything. An active key must leave all retained data unchanged.
@@ -235,21 +259,32 @@ func (g *GCPSecretManagerBackend) Destroy(ctx context.Context, ks Keyspace, key 
 		if _, err := gcpDestroyVersion(v.State); err != nil {
 			return err
 		}
+		if v.State == secretmanagerpb.SecretVersion_DISABLED && v.Etag == "" {
+			return fmt.Errorf("cannot safely destroy a version of secret %q without its ETag", key)
+		}
 	}
-	destroyed := false
+	// The listed versions must belong to the object whose ETag we captured.
+	// Otherwise we could destroy a replacement's versions before its delete fails.
+	current, err := g.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: g.secretName(id)})
+	if err != nil {
+		return err
+	}
+	if current.Etag != secret.Etag {
+		return fmt.Errorf("secret %q changed during destroy; inspect its current state before retrying", key)
+	}
 	for _, v := range versions {
 		if v.State != secretmanagerpb.SecretVersion_DISABLED {
 			continue
 		}
-		if _, err := g.client.DestroySecretVersion(ctx, &secretmanagerpb.DestroySecretVersionRequest{Name: v.Name}); err != nil {
+		destroyed, err := g.client.DestroySecretVersion(ctx, &secretmanagerpb.DestroySecretVersionRequest{Name: v.Name, Etag: v.Etag})
+		if err != nil {
 			return err
 		}
-		destroyed = true
+		if destroyed.State != secretmanagerpb.SecretVersion_DESTROYED {
+			return fmt.Errorf("secret %q has a version pending destruction; wait for it to be destroyed before retrying", key)
+		}
 	}
-	if !destroyed {
-		return ErrNotFound
-	}
-	return nil
+	return g.client.DeleteSecret(ctx, &secretmanagerpb.DeleteSecretRequest{Name: g.secretName(id), Etag: secret.Etag})
 }
 
 // retainedVersions completes enumeration before callers mutate any versions.
@@ -282,8 +317,10 @@ func gcpDestroyVersion(state secretmanagerpb.SecretVersion_State) (bool, error) 
 		return false, ErrActive
 	case secretmanagerpb.SecretVersion_DISABLED:
 		return true, nil
-	default:
+	case secretmanagerpb.SecretVersion_DESTROYED:
 		return false, nil
+	default:
+		return false, fmt.Errorf("cannot destroy a secret version with state %s", state)
 	}
 }
 

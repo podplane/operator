@@ -131,8 +131,11 @@ It owns the operator binary, and for the Podplane Secrets functionality it owns:
 - AWS Parameter Store: archive delete and restore are unsupported; destroy
   deletes the parameter.
 - GCP Secret Manager: delete disables all retained enabled versions; restore
-  re-enables only latest. Destroy checks all versions before destroying disabled
-  archived versions and rejects the operation if any version is enabled.
+  re-enables only latest. Only the secret-object creator may initialize a value.
+  Destroy rejects empty objects and enabled/unknown versions, conditionally
+  destroys archived versions, then deletes the object with its original ETag.
+  Stop and drain other writers before destroy; version additions do not change
+  the parent ETag.
 - Local clusters should use the same path as production:
 
   ```text
