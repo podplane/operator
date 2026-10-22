@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -154,11 +155,7 @@ type StaleKeyError struct{}
 // Error implements error.
 func (StaleKeyError) Error() string { return "stale public key" }
 
-// AssociatedData returns the authenticated encryption context for a key write.
+// AssociatedData binds the secret's identity and binary mode to its ciphertext.
 func AssociatedData(algorithm, clusterID, namespace, resourceName, key string, binary bool) []byte {
-	parts := []string{algorithm, clusterID, namespace, resourceName, key}
-	if binary {
-		parts = append(parts, "binary")
-	}
-	return []byte(strings.Join(parts, "\x00"))
+	return []byte(strings.Join([]string{algorithm, clusterID, namespace, resourceName, key, strconv.FormatBool(binary)}, "\x00"))
 }

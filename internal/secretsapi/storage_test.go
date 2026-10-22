@@ -265,9 +265,9 @@ func TestBinaryWritesAndAuthenticatedIntent(t *testing.T) {
 			}
 		}
 	}
-	legacy := Algorithm + "\x00cluster\x00namespace\x00provider.binding\x00first"
-	if string(AssociatedData(Algorithm, "cluster", "namespace", "provider.binding", "first", false)) != legacy || string(AssociatedData(Algorithm, "cluster", "namespace", "provider.binding", "first", true)) != legacy+"\x00binary" {
-		t.Fatal("wire AAD compatibility changed")
+	context := Algorithm + "\x00cluster\x00namespace\x00provider.binding\x00first"
+	if string(AssociatedData(Algorithm, "cluster", "namespace", "provider.binding", "first", false)) != context+"\x00false" || string(AssociatedData(Algorithm, "cluster", "namespace", "provider.binding", "first", true)) != context+"\x00true" {
+		t.Fatal("encryption context must include explicit text or binary mode")
 	}
 }
 
