@@ -57,6 +57,9 @@ func (r Renderer) Render(binding *secretsv1beta1.SecretProviderBinding) (*unstru
 		if err := secretsbackend.ValidateSegment("key", item.Key); err != nil {
 			return nil, secretsv1beta1.SecretProviderBindingStatus{}, err
 		}
+		if item.Binary != nil && provider.Kind != "vault" && provider.Kind != "openbao" {
+			return nil, secretsv1beta1.SecretProviderBindingStatus{}, fmt.Errorf("key %q: binary may only be set for Vault/OpenBao; omit it for provider %q", item.Key, providerName)
+		}
 		p := item.Path
 		if p == "" {
 			p = item.Key
@@ -152,7 +155,11 @@ func (r Renderer) parameters(p ProviderConfig, ks secretsbackend.Keyspace, bindi
 			if obj == "" {
 				obj = it.Key
 			}
-			rows = append(rows, map[string]string{"objectName": obj, "secretPath": mount + "/data/" + rel, "secretKey": "value"})
+			object := map[string]string{"objectName": obj, "secretPath": mount + "/data/" + rel, "secretKey": "value"}
+			if it.Binary != nil && *it.Binary {
+				object["encoding"] = "base64"
+			}
+			rows = append(rows, object)
 		}
 		y, _ := yaml.Marshal(rows)
 		prefix := "vault"

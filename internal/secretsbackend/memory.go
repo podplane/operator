@@ -42,7 +42,10 @@ func (m *MemoryBackend) key(ks Keyspace, k string) (string, string, error) {
 }
 
 // Create stores a new in-memory key.
-func (m *MemoryBackend) Create(_ context.Context, ks Keyspace, key string, value []byte) (Entry, error) {
+func (m *MemoryBackend) Create(_ context.Context, ks Keyspace, key string, value []byte, binary bool) (Entry, error) {
+	if err := ValidateValue(value, binary); err != nil {
+		return Entry{}, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	id, p, err := m.key(ks, key)
@@ -60,7 +63,10 @@ func (m *MemoryBackend) Create(_ context.Context, ks Keyspace, key string, value
 }
 
 // Update overwrites an active in-memory key.
-func (m *MemoryBackend) Update(_ context.Context, ks Keyspace, key string, value []byte) (Entry, error) {
+func (m *MemoryBackend) Update(_ context.Context, ks Keyspace, key string, value []byte, binary bool) (Entry, error) {
+	if err := ValidateValue(value, binary); err != nil {
+		return Entry{}, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	id, p, err := m.key(ks, key)

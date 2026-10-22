@@ -55,7 +55,10 @@ func (g *GCPSecretManagerBackend) versionName(id string) string {
 }
 
 // Create creates a new secret and initial version.
-func (g *GCPSecretManagerBackend) Create(ctx context.Context, ks Keyspace, key string, value []byte) (Entry, error) {
+func (g *GCPSecretManagerBackend) Create(ctx context.Context, ks Keyspace, key string, value []byte, binary bool) (Entry, error) {
+	if err := ValidateValue(value, binary); err != nil {
+		return Entry{}, err
+	}
 	id, err := ks.GCPSecretID(key)
 	if err != nil {
 		return Entry{}, err
@@ -81,7 +84,10 @@ func (g *GCPSecretManagerBackend) Create(ctx context.Context, ks Keyspace, key s
 }
 
 // Update adds a new secret version.
-func (g *GCPSecretManagerBackend) Update(ctx context.Context, ks Keyspace, key string, value []byte) (Entry, error) {
+func (g *GCPSecretManagerBackend) Update(ctx context.Context, ks Keyspace, key string, value []byte, binary bool) (Entry, error) {
+	if err := ValidateValue(value, binary); err != nil {
+		return Entry{}, err
+	}
 	id, err := ks.GCPSecretID(key)
 	if err != nil {
 		return Entry{}, err

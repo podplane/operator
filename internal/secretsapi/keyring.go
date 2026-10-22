@@ -155,6 +155,10 @@ type StaleKeyError struct{}
 func (StaleKeyError) Error() string { return "stale public key" }
 
 // AssociatedData returns the authenticated encryption context for a key write.
-func AssociatedData(algorithm, clusterID, namespace, resourceName, key string) []byte {
-	return []byte(strings.Join([]string{algorithm, clusterID, namespace, resourceName, key}, "\x00"))
+func AssociatedData(algorithm, clusterID, namespace, resourceName, key string, binary bool) []byte {
+	parts := []string{algorithm, clusterID, namespace, resourceName, key}
+	if binary {
+		parts = append(parts, "binary")
+	}
+	return []byte(strings.Join(parts, "\x00"))
 }

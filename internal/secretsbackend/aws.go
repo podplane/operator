@@ -44,12 +44,21 @@ func (a *AWSSecretsManagerBackend) ProviderName() string { return a.name }
 func (a *AWSSecretsManagerBackend) ProviderKind() string { return "aws" }
 
 // Create creates a new Secrets Manager secret.
-func (a *AWSSecretsManagerBackend) Create(ctx context.Context, ks Keyspace, key string, value []byte) (Entry, error) {
+func (a *AWSSecretsManagerBackend) Create(ctx context.Context, ks Keyspace, key string, value []byte, binary bool) (Entry, error) {
+	if err := ValidateValue(value, binary); err != nil {
+		return Entry{}, err
+	}
 	p, err := ks.SlashPath(key)
 	if err != nil {
 		return Entry{}, err
 	}
-	_, err = a.client.CreateSecret(ctx, &sm.CreateSecretInput{Name: aws.String(p), SecretString: aws.String(string(value)), Tags: []smtypes.Tag{{Key: aws.String("podplane.dev/cluster-prefix"), Value: aws.String(ks.Prefix)}, {Key: aws.String("podplane.dev/namespace"), Value: aws.String(ks.Namespace)}, {Key: aws.String("podplane.dev/binding"), Value: aws.String(ks.BindingName)}}})
+	in := &sm.CreateSecretInput{Name: aws.String(p), Tags: []smtypes.Tag{{Key: aws.String("podplane.dev/cluster-prefix"), Value: aws.String(ks.Prefix)}, {Key: aws.String("podplane.dev/namespace"), Value: aws.String(ks.Namespace)}, {Key: aws.String("podplane.dev/binding"), Value: aws.String(ks.BindingName)}}}
+	if binary {
+		in.SecretBinary = value
+	} else {
+		in.SecretString = aws.String(string(value))
+	}
+	_, err = a.client.CreateSecret(ctx, in)
 	if err != nil {
 		switch awsErrorCode(err) {
 		case "ResourceExistsException":
@@ -65,12 +74,21 @@ func (a *AWSSecretsManagerBackend) Create(ctx context.Context, ks Keyspace, key 
 }
 
 // Update writes a new Secrets Manager secret version.
-func (a *AWSSecretsManagerBackend) Update(ctx context.Context, ks Keyspace, key string, value []byte) (Entry, error) {
+func (a *AWSSecretsManagerBackend) Update(ctx context.Context, ks Keyspace, key string, value []byte, binary bool) (Entry, error) {
+	if err := ValidateValue(value, binary); err != nil {
+		return Entry{}, err
+	}
 	p, err := ks.SlashPath(key)
 	if err != nil {
 		return Entry{}, err
 	}
-	_, err = a.client.PutSecretValue(ctx, &sm.PutSecretValueInput{SecretId: aws.String(p), SecretString: aws.String(string(value))})
+	in := &sm.PutSecretValueInput{SecretId: aws.String(p)}
+	if binary {
+		in.SecretBinary = value
+	} else {
+		in.SecretString = aws.String(string(value))
+	}
+	_, err = a.client.PutSecretValue(ctx, in)
 	if err != nil {
 		switch awsErrorCode(err) {
 		case "ResourceNotFoundException":
@@ -216,12 +234,15 @@ func (a *AWSParameterStoreBackend) ProviderName() string { return a.name }
 func (a *AWSParameterStoreBackend) ProviderKind() string { return "aws" }
 
 // Create creates a new Parameter Store parameter.
-func (a *AWSParameterStoreBackend) Create(ctx context.Context, ks Keyspace, key string, value []byte) (Entry, error) {
+func (a *AWSParameterStoreBackend) Create(ctx context.Context, ks Keyspace, key string, value []byte, binary bool) (Entry, error) {
+	if err := ValidateValue(value, binary); err != nil {
+		return Entry{}, err
+	}
 	p, err := ks.SlashPath(key)
 	if err != nil {
 		return Entry{}, err
 	}
-	_, err = a.client.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(p), Value: aws.String(string(value)), Type: "SecureString", Overwrite: aws.Bool(false)})
+	_, err = a.client.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(p), Value: aws.String(textStorageValue(value, binary)), Type: "SecureString", Overwrite: aws.Bool(false)})
 	if err != nil {
 		if awsErrorCode(err) == "ParameterAlreadyExists" {
 			return Entry{}, ErrAlreadyExists
@@ -232,7 +253,10 @@ func (a *AWSParameterStoreBackend) Create(ctx context.Context, ks Keyspace, key 
 }
 
 // Update overwrites an existing Parameter Store parameter.
-func (a *AWSParameterStoreBackend) Update(ctx context.Context, ks Keyspace, key string, value []byte) (Entry, error) {
+func (a *AWSParameterStoreBackend) Update(ctx context.Context, ks Keyspace, key string, value []byte, binary bool) (Entry, error) {
+	if err := ValidateValue(value, binary); err != nil {
+		return Entry{}, err
+	}
 	p, err := ks.SlashPath(key)
 	if err != nil {
 		return Entry{}, err
@@ -243,7 +267,7 @@ func (a *AWSParameterStoreBackend) Update(ctx context.Context, ks Keyspace, key 
 		}
 		return Entry{}, err
 	}
-	_, err = a.client.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(p), Value: aws.String(string(value)), Type: "SecureString", Overwrite: aws.Bool(true)})
+	_, err = a.client.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(p), Value: aws.String(textStorageValue(value, binary)), Type: "SecureString", Overwrite: aws.Bool(true)})
 	if err != nil {
 		return Entry{}, err
 	}

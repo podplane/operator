@@ -6,12 +6,14 @@ package secretsbackend
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"path"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -58,12 +60,29 @@ type Entry struct {
 	RestoreUntil *time.Time `json:"restoreUntil,omitempty"`
 }
 
+// ValidateValue rejects non-UTF-8 text without disclosing its contents.
+// Explicit binary values may contain arbitrary bytes.
+func ValidateValue(value []byte, binary bool) error {
+	if !binary && !utf8.Valid(value) {
+		return errors.New("secret value must be valid UTF-8")
+	}
+	return nil
+}
+
+// textStorageValue returns text unchanged, or padded standard base64 for binary values.
+func textStorageValue(value []byte, binary bool) string {
+	if binary {
+		return base64.StdEncoding.EncodeToString(value)
+	}
+	return string(value)
+}
+
 // Backend is implemented by secrets provider adapters.
 type Backend interface {
 	ProviderName() string
 	ProviderKind() string
-	Create(ctx context.Context, ks Keyspace, key string, value []byte) (Entry, error)
-	Update(ctx context.Context, ks Keyspace, key string, value []byte) (Entry, error)
+	Create(ctx context.Context, ks Keyspace, key string, value []byte, binary bool) (Entry, error)
+	Update(ctx context.Context, ks Keyspace, key string, value []byte, binary bool) (Entry, error)
 	List(ctx context.Context, ks Keyspace) ([]Entry, error)
 	Archive(ctx context.Context, ks Keyspace, key string) error
 	ArchiveAll(ctx context.Context, ks Keyspace) error

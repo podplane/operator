@@ -260,6 +260,13 @@ func schema_podplane_operator_internal_secretsapi_SecretProviderKeyspaceEntry(re
 				Description: "SecretProviderKeyspaceEntry declares one key operation.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
+					"binary": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Binary explicitly selects binary storage for create/update. Defaults to false (valid UTF-8 text stored unchanged). Forbidden on restore. Authenticated as part of the encryption context. AWS Secrets Manager uses SecretBinary; GCP stores raw bytes; Parameter Store and Vault/OpenBao store padded standard base64 for binary values. AWS/GCP CSI mounts contain the original bytes; Parameter Store mounts contain base64 text. Vault/OpenBao mounts contain base64 text unless the SecretProviderBinding item sets binary: true, which enables base64 decoding in the generated SecretProviderClass.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
 					"key": {
 						SchemaProps: spec.SchemaProps{
 							Default: "",

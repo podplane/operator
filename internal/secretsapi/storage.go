@@ -122,7 +122,7 @@ func (s *KeyspaceStorage) Update(ctx context.Context, name string, objInfo rest.
 			if e.Operation == "update" {
 				requiredVerbs.Insert("overwrite")
 			}
-			value, err := s.Keys.Decrypt(*e.EncryptedValue, AssociatedData(e.EncryptedValue.Algorithm, s.ClusterID, namespace, name, e.Key))
+			value, err := s.Keys.Decrypt(*e.EncryptedValue, AssociatedData(e.EncryptedValue.Algorithm, s.ClusterID, namespace, name, e.Key, e.Binary))
 			if err != nil {
 				var stale StaleKeyError
 				if errors.As(err, &stale) {
@@ -131,7 +131,13 @@ func (s *KeyspaceStorage) Update(ctx context.Context, name string, objInfo rest.
 				return nil, false, apierrors.NewBadRequest(err.Error())
 			}
 			op.value = value
+			if err := secretsbackend.ValidateValue(op.value, e.Binary); err != nil {
+				return nil, false, apierrors.NewBadRequest(err.Error())
+			}
 		case "restore":
+			if e.Binary {
+				return nil, false, apierrors.NewBadRequest("binary is not allowed on restore")
+			}
 			requiredVerbs.Insert("restore")
 		default:
 			return nil, false, apierrors.NewBadRequest(fmt.Sprintf("unsupported operation %q", e.Operation))
@@ -151,9 +157,9 @@ func (s *KeyspaceStorage) Update(ctx context.Context, name string, objInfo rest.
 			var out secretsbackend.Entry
 			var err error
 			if e.Operation == "create" {
-				out, err = b.Create(ctx, ks, e.Key, op.value)
+				out, err = b.Create(ctx, ks, e.Key, op.value, e.Binary)
 			} else {
-				out, err = b.Update(ctx, ks, e.Key, op.value)
+				out, err = b.Update(ctx, ks, e.Key, op.value, e.Binary)
 			}
 			if err != nil {
 				return nil, false, backendError(err, name)

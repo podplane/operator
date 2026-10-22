@@ -137,14 +137,33 @@ func newTestGCPBackend(t *testing.T) (*GCPSecretManagerBackend, *fakeGCPSecrets)
 	return &GCPSecretManagerBackend{name: "gcp", projectID: "test", client: c}, f
 }
 
+// TestGCPWritesPreservePlaintext verifies text and binary writes retain the original payload bytes.
+func TestGCPWritesPreservePlaintext(t *testing.T) {
+	ks := Keyspace{Prefix: "cluster", Namespace: "ns", BindingName: "binding"}
+	for _, tc := range writeTestValues() {
+		g, f := newTestGCPBackend(t)
+		for i, write := range []func(context.Context, Keyspace, string, []byte, bool) (Entry, error){g.Create, g.Update} {
+			if _, err := write(context.Background(), ks, "key", tc.value, tc.binary); err != nil {
+				t.Fatal(err)
+			}
+			f.mu.Lock()
+			equal := string(f.values[i]) == string(tc.value)
+			f.mu.Unlock()
+			if !equal {
+				t.Fatal("provider payload changed plaintext bytes")
+			}
+		}
+	}
+}
+
 func TestGCPLifecycle(t *testing.T) {
 	g, f := newTestGCPBackend(t)
 	ctx := context.Background()
 	ks := Keyspace{Prefix: "cluster", Namespace: "ns", BindingName: "binding"}
-	if _, err := g.Create(ctx, ks, "key", []byte("first")); err != nil {
+	if _, err := g.Create(ctx, ks, "key", []byte("first"), false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.Update(ctx, ks, "key", []byte("second")); err != nil {
+	if _, err := g.Update(ctx, ks, "key", []byte("second"), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := g.Archive(ctx, ks, "key"); err != nil {
@@ -158,10 +177,10 @@ func TestGCPLifecycle(t *testing.T) {
 			t.Fatal("archive retained an enabled version")
 		}
 	}
-	if _, err := g.Create(ctx, ks, "key", nil); !errors.Is(err, ErrArchived) {
+	if _, err := g.Create(ctx, ks, "key", nil, false); !errors.Is(err, ErrArchived) {
 		t.Fatalf("create archived: %v", err)
 	}
-	if _, err := g.Update(ctx, ks, "key", nil); !errors.Is(err, ErrArchived) {
+	if _, err := g.Update(ctx, ks, "key", nil, false); !errors.Is(err, ErrArchived) {
 		t.Fatalf("update archived: %v", err)
 	}
 	if _, err := g.Restore(ctx, ks, "key"); err != nil {
@@ -196,7 +215,7 @@ func TestGCPLifecycle(t *testing.T) {
 	if _, err := g.Restore(ctx, ks, "key"); err == nil {
 		t.Fatal("restored destroyed key")
 	}
-	if _, err := g.Create(ctx, ks, "key", []byte("new")); err != nil {
+	if _, err := g.Create(ctx, ks, "key", []byte("new"), false); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.versions) != 3 || f.versions[2].State != secretmanagerpb.SecretVersion_ENABLED {
@@ -208,7 +227,7 @@ func TestGCPDestroyPreflight(t *testing.T) {
 	g, f := newTestGCPBackend(t)
 	ctx := context.Background()
 	ks := Keyspace{Prefix: "cluster", Namespace: "ns", BindingName: "binding"}
-	if _, err := g.Create(ctx, ks, "key", []byte("first")); err != nil {
+	if _, err := g.Create(ctx, ks, "key", []byte("first"), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := g.Archive(ctx, ks, "key"); err != nil {
@@ -217,7 +236,7 @@ func TestGCPDestroyPreflight(t *testing.T) {
 	if _, err := g.Restore(ctx, ks, "key"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.Update(ctx, ks, "key", []byte("second")); err != nil {
+	if _, err := g.Update(ctx, ks, "key", []byte("second"), false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.change(f.versions[0].Name, secretmanagerpb.SecretVersion_DISABLED); err != nil {

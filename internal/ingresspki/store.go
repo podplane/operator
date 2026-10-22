@@ -55,16 +55,16 @@ func (s *backendStore) Load(ctx context.Context, key string) ([]byte, error) {
 
 // Save replaces an existing value or creates it without an upsert race.
 func (s *backendStore) Save(ctx context.Context, key string, value []byte) error {
-	if _, err := s.backend.Update(ctx, s.keyspace, key, value); err == nil {
+	if _, err := s.backend.Update(ctx, s.keyspace, key, value, false); err == nil {
 		return nil
 	} else if !errors.Is(err, secretsbackend.ErrNotFound) {
 		return err
 	}
-	if _, err := s.backend.Create(ctx, s.keyspace, key, value); err == nil {
+	if _, err := s.backend.Create(ctx, s.keyspace, key, value, false); err == nil {
 		return nil
 	} else if !errors.Is(err, secretsbackend.ErrAlreadyExists) {
 		return err
 	}
-	_, err := s.backend.Update(ctx, s.keyspace, key, value)
+	_, err := s.backend.Update(ctx, s.keyspace, key, value, false)
 	return err
 }

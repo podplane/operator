@@ -14,7 +14,57 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+// TestVaultWritesPreservePlaintext verifies text is unchanged and binary is stored as base64.
+func TestVaultWritesPreservePlaintext(t *testing.T) {
+	for _, tc := range writeTestValues() {
+		for _, operation := range []string{"create", "update"} {
+			t.Run(operation, func(t *testing.T) {
+				writes := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet {
+						if operation == "create" {
+							w.WriteHeader(http.StatusNotFound)
+						} else {
+							_, _ = w.Write([]byte(`{"data":{"current_version":1,"versions":{"1":{}}}}`))
+						}
+						return
+					}
+					var body struct {
+						Data map[string]string `json:"data"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					if body.Data["value"] != tc.stored {
+						t.Error("provider payload changed plaintext bytes")
+					}
+					writes++
+					_, _ = w.Write([]byte(`{}`))
+				}))
+				defer server.Close()
+				backend, err := NewVaultBackend(VaultOptions{Name: "provider", Address: server.URL})
+				if err != nil {
+					t.Fatal(err)
+				}
+				backend.loginToken = "test-token"
+				backend.loginTokenExpires = time.Now().Add(time.Hour)
+				write := backend.Create
+				if operation == "update" {
+					write = backend.Update
+				}
+				if _, err := write(context.Background(), Keyspace{Prefix: "cluster", Namespace: "ns", BindingName: "binding"}, "key", tc.value, tc.binary); err != nil {
+					t.Fatal(err)
+				}
+				if writes != 1 {
+					t.Fatalf("writes = %d, want 1", writes)
+				}
+			})
+		}
+	}
+}
 
 func TestVaultDestroyRejectsInvalidKeyBeforeRequest(t *testing.T) {
 	called := false

@@ -79,12 +79,21 @@ func TestBindingProviderInheritance(t *testing.T) {
 	}
 }
 
+// TestBindingProviderResolutionErrors verifies invalid provider selections and
+// unsupported binary mounts report Not Ready without changing the generated class.
 func TestBindingProviderResolutionErrors(t *testing.T) {
-	for _, tc := range []struct{ name, explicit, defaultProvider, wantError string }{
-		{"missing default", "", "", "no default secrets provider"},
-		{"unknown default", "", "missing", `unknown provider "missing"`},
-		{"invalid default", "", "not/a/provider", `unknown provider "not/a/provider"`},
-		{"unknown explicit does not fall back", "missing", "aws-store", `unknown provider "missing"`},
+	for _, tc := range []struct {
+		name, explicit, defaultProvider, wantError string
+		binary                                     *bool
+	}{
+		{"missing default", "", "", "no default secrets provider", nil},
+		{"unknown default", "", "missing", `unknown provider "missing"`, nil},
+		{"invalid default", "", "not/a/provider", `unknown provider "not/a/provider"`, nil},
+		{"unknown explicit does not fall back", "missing", "aws-store", `unknown provider "missing"`, nil},
+		{"binary default ssm", "", "ssm-store", "binary may only be set for Vault/OpenBao", ptr(true)},
+		{"binary explicit ssm overrides default", "ssm-store", "vault", "binary may only be set for Vault/OpenBao", ptr(true)},
+		{"explicit false default aws", "", "aws-store", "binary may only be set for Vault/OpenBao", ptr(false)},
+		{"explicit false google overrides default", "google", "vault", "binary may only be set for Vault/OpenBao", ptr(false)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := runtime.NewScheme()
@@ -95,13 +104,16 @@ func TestBindingProviderResolutionErrors(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "team-a"},
 				Spec: secretsv1beta1.SecretProviderBindingSpec{
 					ProviderName: tc.explicit,
-					Items:        []secretsv1beta1.SecretProviderBindingItem{{Key: "password"}},
+					Items:        []secretsv1beta1.SecretProviderBindingItem{{Key: "password", Binary: tc.binary}},
 				},
 			}
 			r := &SecretProviderBindingReconciler{
 				Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(binding).WithObjects(binding).Build(),
 				Renderer: Renderer{ClusterID: "cluster", DefaultProvider: tc.defaultProvider, Providers: map[string]ProviderConfig{
 					"aws-store": {Name: "aws-store", Kind: "aws"},
+					"ssm-store": {Name: "ssm-store", Kind: "aws", ObjectType: "ssmparameter"},
+					"google":    {Name: "google", Kind: "gcp", ProjectID: "project"},
+					"vault":     {Name: "vault", Kind: "vault"},
 				}},
 			}
 			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: binding.Namespace, Name: binding.Name}}

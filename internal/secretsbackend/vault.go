@@ -197,11 +197,14 @@ func vaultHTTPClient(caCert string) (*http.Client, error) {
 }
 
 // Create creates a new KV-v2 value.
-func (v *VaultBackend) Create(ctx context.Context, ks Keyspace, key string, value []byte) (Entry, error) {
+func (v *VaultBackend) Create(ctx context.Context, ks Keyspace, key string, value []byte, binary bool) (Entry, error) {
+	if err := ValidateValue(value, binary); err != nil {
+		return Entry{}, err
+	}
 	meta, err := v.metadataInfo(ctx, ks, key)
 	if err == nil {
 		if meta.currentVersion == 0 {
-			return v.write(ctx, ks, key, value, 0)
+			return v.write(ctx, ks, key, value, binary, 0)
 		}
 		if meta.archived {
 			return Entry{}, ArchivedError(key)
@@ -211,11 +214,14 @@ func (v *VaultBackend) Create(ctx context.Context, ks Keyspace, key string, valu
 	if !errors.Is(err, ErrNotFound) {
 		return Entry{}, err
 	}
-	return v.write(ctx, ks, key, value, 0)
+	return v.write(ctx, ks, key, value, binary, 0)
 }
 
 // Update overwrites an existing active KV-v2 value.
-func (v *VaultBackend) Update(ctx context.Context, ks Keyspace, key string, value []byte) (Entry, error) {
+func (v *VaultBackend) Update(ctx context.Context, ks Keyspace, key string, value []byte, binary bool) (Entry, error) {
+	if err := ValidateValue(value, binary); err != nil {
+		return Entry{}, err
+	}
 	meta, err := v.metadataInfo(ctx, ks, key)
 	if err != nil {
 		return Entry{}, err
@@ -226,7 +232,7 @@ func (v *VaultBackend) Update(ctx context.Context, ks Keyspace, key string, valu
 	if meta.archived {
 		return Entry{}, ArchivedError(key)
 	}
-	return v.write(ctx, ks, key, value, meta.currentVersion)
+	return v.write(ctx, ks, key, value, binary, meta.currentVersion)
 }
 
 // Read returns the current KV-v2 value for operator-owned state.
@@ -259,12 +265,12 @@ func (v *VaultBackend) Read(ctx context.Context, ks Keyspace, key string) ([]byt
 }
 
 // write writes a KV-v2 value.
-func (v *VaultBackend) write(ctx context.Context, ks Keyspace, key string, value []byte, cas int) (Entry, error) {
+func (v *VaultBackend) write(ctx context.Context, ks Keyspace, key string, value []byte, binary bool, cas int) (Entry, error) {
 	rel, dp, err := v.dataPath(ks, key)
 	if err != nil {
 		return Entry{}, err
 	}
-	body := map[string]any{"data": map[string]string{"value": string(value)}, "options": map[string]int{"cas": cas}}
+	body := map[string]any{"data": map[string]string{"value": textStorageValue(value, binary)}, "options": map[string]int{"cas": cas}}
 	resp, err := v.request(ctx, http.MethodPost, dp, body)
 	if err != nil {
 		if cas == 0 && isVaultCheckAndSetError(err) {

@@ -44,6 +44,14 @@ type SecretProviderBindingItem struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 	Key string `json:"key"`
 
+	// Binary enables base64 decoding for Vault/OpenBao values written with --binary.
+	// Omitted behaves as false, leaving the stored value unchanged.
+	// Setting either true or false is only allowed for Vault/OpenBao: AWS Secrets
+	// Manager and GCP mount original bytes automatically, while SSM cannot decode.
+	// Validation uses providerName, or the cluster default when omitted.
+	// +kubebuilder:validation:Optional
+	Binary *bool `json:"binary,omitempty"`
+
 	// Path is the relative mounted content path inside mountPath. It defaults to key when omitted.
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MinLength=1

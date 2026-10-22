@@ -117,6 +117,15 @@ type SecretProviderKeyspaceSpec struct {
 // +k8s:openapi-gen=true
 // +k8s:openapi-model-package=com.github.podplane.operator.internal.secretsapi
 type SecretProviderKeyspaceEntry struct {
+	// Binary explicitly selects binary storage for create/update. Defaults to false
+	// (valid UTF-8 text stored unchanged). Forbidden on restore. Authenticated as
+	// part of the encryption context. AWS Secrets Manager uses SecretBinary;
+	// GCP stores raw bytes; Parameter Store and Vault/OpenBao store padded standard
+	// base64 for binary values. AWS/GCP CSI mounts contain the original bytes;
+	// Parameter Store mounts contain base64 text. Vault/OpenBao mounts contain
+	// base64 text unless the SecretProviderBinding item sets binary: true, which
+	// enables base64 decoding in the generated SecretProviderClass.
+	Binary         bool            `json:"binary,omitempty"`
 	Key            string          `json:"key"`
 	Operation      string          `json:"operation"`
 	EncryptedValue *EncryptedValue `json:"encryptedValue,omitempty"`
