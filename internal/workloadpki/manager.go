@@ -66,21 +66,23 @@ var (
 	caNotAfter       = prometheus.NewGauge(prometheus.GaugeOpts{Name: "podplane_workload_certificate_ca_not_after_seconds", Help: "Active workload CA expiry as Unix time."})
 	caLoadErrors     = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_ca_load_errors_total", Help: "Workload CA key load errors."})
 	bundleErrors     = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_trust_bundle_reconcile_errors_total", Help: "Trust bundle reconciliation errors."})
+	bundleSyncErrors = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_trust_bundle_sync_errors_total", Help: "Trust bundle synchronization passes with failed destinations."})
 	servingErrors    = prometheus.NewCounter(prometheus.CounterOpts{Name: "podplane_workload_certificate_serving_reconcile_errors_total", Help: "Operator serving certificate reconciliation errors."})
 )
 
 // init registers package defaults with their supporting libraries.
 func init() {
-	metrics.Registry.MustRegister(pcrTotal, pcrPending, pcrOldest, signerReady, collectionOK, collectionErrors, statusConflicts, caNotAfter, caLoadErrors, bundleErrors, servingErrors)
+	metrics.Registry.MustRegister(pcrTotal, pcrPending, pcrOldest, signerReady, collectionOK, collectionErrors, statusConflicts, caNotAfter, caLoadErrors, bundleErrors, bundleSyncErrors, servingErrors)
 }
 
 var trustDomainRE = regexp.MustCompile(`^[a-z0-9._-]+$`)
 
 // Config is the complete signer configuration.
 type Config struct {
-	TrustDomain string
-	CAPath      string
-	Serving     []ServingCertificate
+	TrustDomain     string
+	CAPath          string
+	Serving         []ServingCertificate
+	TrustBundleSync TrustBundleSyncConfig
 }
 
 // Validate checks the signer configuration.
@@ -96,7 +98,7 @@ func (c Config) Validate() error {
 			return err
 		}
 	}
-	return nil
+	return ValidateTrustBundleSync(c.TrustBundleSync.Resources)
 }
 
 // Manager owns the in-memory signer and publication readiness.
@@ -397,6 +399,11 @@ func (m *Manager) reconcileCA(ctx context.Context) {
 		return
 	}
 	m.activate(key, selected, bundle)
+	if err := m.syncTrustBundle(ctx, bundle); err != nil {
+		bundleSyncErrors.Inc()
+		m.setReady(false)
+		ctrl.LoggerFrom(ctx).Error(err, "Workload trust bundle sync failed")
+	}
 }
 
 // activate replaces the active signer after its trust bundle is published.

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/podplane/operator/internal/controllers"
+	"github.com/podplane/operator/internal/workloadpki"
 )
 
 // File is the top-level operator configuration file.
@@ -44,7 +45,8 @@ type SPIFFE struct {
 
 // Certificates configures the workload signer. It is enabled when trust_domain is resolved.
 type Certificates struct {
-	CAPath string `json:"ca_path,omitempty"`
+	CAPath          string                            `json:"ca_path,omitempty"`
+	TrustBundleSync workloadpki.TrustBundleSyncConfig `json:"trust_bundle_sync,omitempty"`
 }
 
 // OIDC configures the cluster OIDC issuer used by operator modules.
@@ -112,6 +114,12 @@ func Load(path string) (File, error) {
 		return File{}, fmt.Errorf("cluster.id is required when secrets providers are configured")
 	}
 	if _, err := f.KeyRotationDuration(); err != nil {
+		return File{}, err
+	}
+	if len(f.Certificates.TrustBundleSync.Resources) > 0 && f.Cluster.SPIFFE.TrustDomain == "" {
+		return File{}, fmt.Errorf("cluster.spiffe.trust_domain is required for certificates.trust_bundle_sync")
+	}
+	if err := workloadpki.ValidateTrustBundleSync(f.Certificates.TrustBundleSync.Resources); err != nil {
 		return File{}, err
 	}
 	names := make([]string, 0, len(f.Secrets.Providers))

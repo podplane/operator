@@ -19,14 +19,17 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
 
 	certv1 "k8s.io/api/certificates/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -283,6 +286,327 @@ func TestStrictPKCS8Ed25519Loading(t *testing.T) {
 	}
 	if _, err := parseKeyFile(path); err == nil {
 		t.Fatal("accepted trailing data")
+	}
+}
+
+// TestTrustBundleSync verifies public bundle publication, renewal, and drift repair
+// while preserving unrelated resource data and metadata.
+func TestTrustBundleSync(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := certv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "trust", Namespace: "router", Labels: map[string]string{"owner": "chart"}}, Type: corev1.SecretTypeOpaque, Data: map[string][]byte{"keep": []byte("unrelated")}}
+	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "trust", Namespace: "other", Annotations: map[string]string{"owner": "chart"}}, BinaryData: map[string][]byte{"keep": {1, 2, 3}}}
+	untouched := secret.DeepCopy()
+	untouched.Namespace = "unconfigured"
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, configMap, untouched).Build()
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	key := writePKCS8Key(t, path)
+	m, err := NewManager(c, c, Config{TrustDomain: "cluster.example", CAPath: path, TrustBundleSync: TrustBundleSyncConfig{Resources: []TrustBundleSyncTarget{
+		{Kind: "Secret", Namespace: "router", Name: "trust", Key: "tls.crt"},
+		{Kind: "ConfigMap", Namespace: "other", Name: "trust", Key: "ca.crt"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// check reconciles the signer and verifies every destination against the published bundle.
+	check := func() string {
+		t.Helper()
+		if err := m.Initialize(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Ready(nil); err != nil {
+			t.Fatal(err)
+		}
+		var bundle certv1.ClusterTrustBundle
+		if err := c.Get(ctx, client.ObjectKey{Name: BundleName}, &bundle); err != nil {
+			t.Fatal(err)
+		}
+		// Comparing whole objects also protects unrelated fields and namespaces.
+		for _, original := range []client.Object{secret, configMap, untouched} {
+			got := original.DeepCopyObject().(client.Object)
+			if err := c.Get(ctx, client.ObjectKeyFromObject(original), got); err != nil {
+				t.Fatal(err)
+			}
+			want := original.DeepCopyObject().(client.Object)
+			switch obj := want.(type) {
+			case *corev1.Secret:
+				if obj.Namespace == "router" {
+					obj.Data["tls.crt"] = []byte(bundle.Spec.TrustBundle)
+				}
+			case *corev1.ConfigMap:
+				obj.Data = map[string]string{"ca.crt": bundle.Spec.TrustBundle}
+			}
+			got.SetResourceVersion("")
+			want.SetResourceVersion("")
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("unexpected fields changed in %T %s", got, client.ObjectKeyFromObject(got))
+			}
+		}
+		return bundle.Spec.TrustBundle
+	}
+	first := check()
+	var synced corev1.Secret
+	if err := c.Get(ctx, client.ObjectKeyFromObject(secret), &synced); err != nil {
+		t.Fatal(err)
+	}
+	version := synced.ResourceVersion
+	check()
+	if err := c.Get(ctx, client.ObjectKeyFromObject(secret), &synced); err != nil {
+		t.Fatal(err)
+	}
+	if synced.ResourceVersion != version {
+		t.Fatal("unchanged bundle rewrote the Secret")
+	}
+	// Repair drift even when the source bundle has not changed.
+	synced.Data["tls.crt"] = []byte("drift")
+	if err := c.Update(ctx, &synced); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	// A CA approaching expiry must publish both the renewed and retained root.
+	old, err := newRoot(key, time.Now().AddDate(-10, 6, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle certv1.ClusterTrustBundle
+	if err := c.Get(ctx, client.ObjectKey{Name: BundleName}, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	bundle.Spec.TrustBundle = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: old.Raw}))
+	if err := c.Update(ctx, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	renewed := check()
+	if first == renewed {
+		t.Fatal("CA did not renew")
+	}
+	var certificates []*x509.Certificate
+	for rest := []byte(renewed); len(rest) > 0; {
+		block, remaining := pem.Decode(rest)
+		if block == nil || block.Type != "CERTIFICATE" {
+			t.Fatal("sync included non-certificate material")
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		certificates = append(certificates, cert)
+		rest = remaining
+	}
+	if len(certificates) != 2 || !certificates[0].Equal(old) || !certificates[1].IsCA || certificates[1].CheckSignatureFrom(certificates[1]) != nil {
+		t.Fatal("sync did not preserve both public roots")
+	}
+}
+
+// rejectingTrustSyncClient simulates missing write permission for one namespace.
+type rejectingTrustSyncClient struct {
+	client.Client
+	reject bool
+}
+
+// Patch rejects the blocked namespace until the test restores permission.
+func (c *rejectingTrustSyncClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if c.reject && obj.GetNamespace() == "blocked" {
+		return apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, obj.GetName(), errors.New("not permitted"))
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
+// TestTrustBundleSyncFailureAndRecovery verifies failures affect readiness without
+// blocking issuance or other destinations, and recover once targets are writable.
+func TestTrustBundleSyncFailureAndRecovery(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := certv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	blocked := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "trust", Namespace: "blocked"}}
+	healthy := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "trust", Namespace: "healthy"}}
+	c := &rejectingTrustSyncClient{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(blocked, healthy).Build(), reject: true}
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	writePKCS8Key(t, path)
+	m, err := NewManager(c, c.Client, Config{TrustDomain: "cluster.example", CAPath: path, TrustBundleSync: TrustBundleSyncConfig{Resources: []TrustBundleSyncTarget{
+		{Kind: "Secret", Namespace: "missing", Name: "trust", Key: "ca.crt"},
+		{Kind: "Secret", Namespace: "blocked", Name: "trust", Key: "ca.crt"},
+		{Kind: "ConfigMap", Namespace: "healthy", Name: "trust", Key: "ca.crt"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Initialize(ctx); err != nil {
+		t.Fatalf("sync failure prevented startup: %v", err)
+	}
+	if m.Ready(nil) == nil {
+		t.Fatal("failed destinations must fail readiness")
+	}
+	bundle, err := m.Bundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, leafKey, _ := ed25519.GenerateKey(rand.Reader)
+	if _, err := m.sign(&certv1.PodCertificateRequest{ObjectMeta: metav1.ObjectMeta{Namespace: "app"}, Spec: certv1.PodCertificateRequestSpec{ServiceAccountName: "app"}}, leafKey.Public(), "spiffe", nil); err != nil {
+		t.Fatalf("sync failure disabled issuance: %v", err)
+	}
+	missing := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "trust", Namespace: "missing"}}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(missing), missing); !apierrors.IsNotFound(err) {
+		t.Fatalf("missing target was created: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(healthy), healthy); err != nil {
+		t.Fatal(err)
+	}
+	if healthy.Data["ca.crt"] != string(bundle) {
+		t.Fatal("failed destinations prevented healthy destination sync")
+	}
+	if err := c.Create(ctx, missing); err != nil {
+		t.Fatal(err)
+	}
+	c.reject = false
+	if err := m.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Ready(nil); err != nil {
+		t.Fatalf("readiness did not recover: %v", err)
+	}
+	for _, target := range []*corev1.Secret{missing, blocked} {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(target), target); err != nil {
+			t.Fatal(err)
+		}
+		if string(target.Data["ca.crt"]) != string(bundle) {
+			t.Fatal("failed destination did not recover")
+		}
+	}
+}
+
+// racingTrustSyncClient simulates another writer creating a target first.
+type racingTrustSyncClient struct {
+	client.Client
+	race bool
+}
+
+// Create inserts an independently owned target before attempting the requested create.
+func (c *racingTrustSyncClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if c.race && obj.GetNamespace() == "app" {
+		other := obj.DeepCopyObject().(client.Object)
+		other.SetLabels(map[string]string{"owner": "other"})
+		switch other := other.(type) {
+		case *corev1.Secret:
+			other.Type = "example.com/custom"
+			other.Data = map[string][]byte{"keep": []byte("unrelated")}
+		case *corev1.ConfigMap:
+			other.Data = map[string]string{"keep": "unrelated"}
+		}
+		if err := c.Client.Create(ctx, other); err != nil {
+			return err
+		}
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+// TestTrustBundleSyncCreation verifies inheritance, explicit overrides, creation
+// races, and deletion recovery for both resource kinds through signer initialization.
+func TestTrustBundleSyncCreation(t *testing.T) {
+	on, off := true, false
+	for _, kind := range []string{"Secret", "ConfigMap"} {
+		for _, tc := range []struct {
+			name          string
+			defaultCreate bool
+			override      *bool
+			wantCreate    bool
+			race          bool
+		}{
+			{name: "default false"},
+			{name: "default true", defaultCreate: true, wantCreate: true},
+			{name: "override true", override: &on, wantCreate: true},
+			{name: "override false", defaultCreate: true, override: &off},
+			{name: "creation race", defaultCreate: true, wantCreate: true, race: true},
+		} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				scheme := runtime.NewScheme()
+				if err := certv1.AddToScheme(scheme); err != nil {
+					t.Fatal(err)
+				}
+				if err := corev1.AddToScheme(scheme); err != nil {
+					t.Fatal(err)
+				}
+				c := &racingTrustSyncClient{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), race: tc.race}
+				path := filepath.Join(t.TempDir(), "ca.pem")
+				m, err := NewManager(c, c.Client, Config{TrustDomain: "cluster.example", CAPath: path, TrustBundleSync: TrustBundleSyncConfig{
+					CreateIfMissing: tc.defaultCreate,
+					Resources:       []TrustBundleSyncTarget{{Kind: kind, Namespace: "app", Name: "trust", Key: "ca.crt", CreateIfMissing: tc.override}},
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var obj client.Object = &corev1.Secret{}
+				if kind == "ConfigMap" {
+					obj = &corev1.ConfigMap{}
+				}
+				name := client.ObjectKey{Namespace: "app", Name: "trust"}
+				if err := m.Initialize(ctx); err == nil {
+					t.Fatal("initialized without a CA key")
+				}
+				if err := c.Get(ctx, name, obj); !apierrors.IsNotFound(err) {
+					t.Fatalf("created a target before a valid bundle was available: %v", err)
+				}
+				writePKCS8Key(t, path)
+				if err := m.Initialize(ctx); err != nil {
+					t.Fatal(err)
+				}
+				err = c.Get(ctx, name, obj)
+				if !tc.wantCreate {
+					if !apierrors.IsNotFound(err) || m.Ready(nil) == nil {
+						t.Fatalf("missing pre-created target: get=%v, ready=%v", err, m.Ready(nil))
+					}
+					return
+				}
+				if err != nil || m.Ready(nil) != nil {
+					t.Fatalf("creation failed: get=%v, ready=%v", err, m.Ready(nil))
+				}
+				bundle, err := m.Bundle()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var got, keep string
+				switch obj := obj.(type) {
+				case *corev1.Secret:
+					got, keep = string(obj.Data["ca.crt"]), string(obj.Data["keep"])
+					wantType := corev1.SecretTypeOpaque
+					if tc.race {
+						wantType = "example.com/custom"
+					}
+					if obj.Type != wantType {
+						t.Fatalf("Secret type = %s, want %s", obj.Type, wantType)
+					}
+				case *corev1.ConfigMap:
+					got, keep = obj.Data["ca.crt"], obj.Data["keep"]
+				}
+				if got != string(bundle) || len(obj.GetOwnerReferences()) != 0 {
+					t.Fatal("created target has incorrect bundle or unexpected ownership")
+				}
+				if tc.race && (keep != "unrelated" || obj.GetLabels()["owner"] != "other") {
+					t.Fatal("creation race overwrote another writer's fields")
+				}
+				if err := c.Delete(ctx, obj); err != nil {
+					t.Fatal(err)
+				}
+				if err := m.Initialize(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if err := c.Get(ctx, name, obj); err != nil || m.Ready(nil) != nil {
+					t.Fatalf("deleted target was not recreated: %v", err)
+				}
+			})
+		}
 	}
 }
 

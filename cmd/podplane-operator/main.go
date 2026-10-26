@@ -96,7 +96,10 @@ func run() error {
 			caPath = "/var/run/podplane/certificates/workload-ca-key"
 		}
 		serving := []workloadpki.ServingCertificate{{Name: "aggregated-api", CertFile: aggregatedAPICertFile, KeyFile: aggregatedAPIKeyFile, DNSNames: workloadpki.ServiceDNSNames(aggregatedAPIServiceName, servingNamespace)}}
-		signer, err := workloadpki.NewManager(mgr.GetClient(), mgr.GetAPIReader(), workloadpki.Config{TrustDomain: cfg.Cluster.SPIFFE.TrustDomain, CAPath: caPath, Serving: serving})
+		signer, err := workloadpki.NewManager(mgr.GetClient(), mgr.GetAPIReader(), workloadpki.Config{
+			TrustDomain: cfg.Cluster.SPIFFE.TrustDomain, CAPath: caPath, Serving: serving,
+			TrustBundleSync: cfg.Certificates.TrustBundleSync,
+		})
 		if err != nil {
 			return err
 		}

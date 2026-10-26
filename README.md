@@ -34,6 +34,18 @@ Example:
     "oidc": {
       "issuer_url": "https://oidc.example.com/dev-cluster",
       "client_id": "dev-cluster"
+    },
+    "spiffe": {
+      "trust_domain": "cluster.example"
+    }
+  },
+  "certificates": {
+    "trust_bundle_sync": {
+      "create_if_missing": false,
+      "resources": [
+        {"kind": "Secret", "namespace": "platform-agent-router", "name": "workload-ca", "key": "tls.crt", "create_if_missing": true},
+        {"kind": "ConfigMap", "namespace": "platform-example", "name": "workload-ca", "key": "ca.crt"}
+      ]
     }
   },
   "secrets": {
@@ -98,6 +110,17 @@ because it causes provider secret values to be persisted into Kubernetes Secret
 objects. To allow it, set `allow_sync_to_kubernetes_secrets: true` in the operator
 config under `secrets` and annotate each permitted namespace with
 `secrets.podplane.dev/allow-sync-to-kubernetes-secrets: "true"`.
+
+For clients that cannot use `ClusterTrustBundle`, `certificates.trust_bundle_sync`
+keeps the public workload CA bundle in the listed Secrets or ConfigMaps, checking
+at startup and every 30 seconds but writing only changed data keys. It requires
+`cluster.spiffe.trust_domain`; omit `resources` to disable it. `create_if_missing`
+defaults to `false` and can be overridden per resource; enable it to create missing
+targets (`Opaque` Secrets), or create them beforehand. Grant named `get`/`patch`
+permissions and, when creation is enabled, namespace-scoped `create` permission
+for that kind. Targets are never automatically deleted, private keys are never
+copied, and the secret-value sync setting above does not apply. Failures mark the
+operator unready and retry without stopping certificate issuance.
 
 With `rbac.namespace_group_bindings: true`, the operator keeps RoleBindings for the
 default Podplane groups (`podplane:managers` → `admin`, `podplane:operators` and

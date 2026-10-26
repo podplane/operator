@@ -5,10 +5,15 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/podplane/operator/internal/workloadpki"
 )
 
 // TestLoadParsesKeyRotation verifies secrets.key_rotation is read from the config file.
@@ -121,5 +126,61 @@ func TestLoadIngressCertificatesRequiresStorageProvider(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("Load succeeded, want missing storage provider error")
+	}
+}
+
+// TestLoadTrustBundleSync verifies destination decoding and rejects invalid configuration.
+func TestLoadTrustBundleSync(t *testing.T) {
+	secret := workloadpki.TrustBundleSyncTarget{Kind: "Secret", Namespace: "platform-router", Name: "workload-ca", Key: "tls.crt"}
+	configMap := workloadpki.TrustBundleSyncTarget{Kind: "ConfigMap", Namespace: "tenant-a", Name: "trust.roots", Key: "ca.crt"}
+	on, off := true, false
+	createSecret, precreatedMap := secret, configMap
+	createSecret.CreateIfMissing = &on
+	precreatedMap.CreateIfMissing = &off
+	for _, tc := range []struct {
+		name            string
+		domain          string
+		targets         []workloadpki.TrustBundleSyncTarget
+		createIfMissing bool
+		wantErr         string
+	}{
+		{name: "disabled by default"},
+		{name: "both kinds", domain: "cluster.example", targets: []workloadpki.TrustBundleSyncTarget{secret, configMap}},
+		{name: "creation overrides", domain: "cluster.example", targets: []workloadpki.TrustBundleSyncTarget{createSecret, precreatedMap}, createIfMissing: true},
+		{name: "requires signer", targets: []workloadpki.TrustBundleSyncTarget{secret}, wantErr: "trust_domain"},
+		{name: "duplicates", domain: "cluster.example", targets: []workloadpki.TrustBundleSyncTarget{secret, secret}, wantErr: "duplicate"},
+		{name: "duplicates with different creation policy", domain: "cluster.example", targets: []workloadpki.TrustBundleSyncTarget{secret, createSecret}, wantErr: "duplicate"},
+		{name: "unknown kind", domain: "cluster.example", targets: []workloadpki.TrustBundleSyncTarget{{Kind: "secret", Namespace: "ns", Name: "ca", Key: "ca.crt"}}, wantErr: "kind"},
+		{name: "missing namespace", domain: "cluster.example", targets: []workloadpki.TrustBundleSyncTarget{{Kind: "Secret", Name: "ca", Key: "ca.crt"}}, wantErr: "namespace"},
+		{name: "invalid name", domain: "cluster.example", targets: []workloadpki.TrustBundleSyncTarget{{Kind: "ConfigMap", Namespace: "ns", Name: "bad/name", Key: "ca.crt"}}, wantErr: "name"},
+		{name: "missing key", domain: "cluster.example", targets: []workloadpki.TrustBundleSyncTarget{{Kind: "Secret", Namespace: "ns", Name: "ca"}}, wantErr: "key"},
+		{name: "invalid key", domain: "cluster.example", targets: []workloadpki.TrustBundleSyncTarget{{Kind: "Secret", Namespace: "ns", Name: "ca", Key: "../ca"}}, wantErr: "key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			contents, err := json.Marshal(map[string]any{
+				"cluster":      map[string]any{"spiffe": map[string]string{"trust_domain": tc.domain}},
+				"certificates": map[string]any{"trust_bundle_sync": map[string]any{"create_if_missing": tc.createIfMissing, "resources": tc.targets}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Load error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Certificates.TrustBundleSync.CreateIfMissing != tc.createIfMissing || !reflect.DeepEqual(cfg.Certificates.TrustBundleSync.Resources, tc.targets) {
+				t.Fatalf("destinations = %+v, want %+v", cfg.Certificates.TrustBundleSync, tc.targets)
+			}
+		})
 	}
 }
