@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/podplane/operator/internal/ingresspki"
 )
@@ -45,11 +46,11 @@ func (f certificateFlags) String() string { return fmt.Sprint(map[string]string(
 // Set parses and validates one resource-name-to-domain mapping.
 func (f certificateFlags) Set(value string) error {
 	name, domain, ok := strings.Cut(value, "=")
-	if !ok || name == "" || domain == "" || filepath.Base(name) != name || name == "." || strings.ContainsAny(name, `/\\`) {
-		return fmt.Errorf("domain-certificate must be <resource-name>=<apex-domain>")
+	if !ok || name == "" || domain == "" || filepath.Base(name) != name || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
+		return fmt.Errorf("certificate mapping must be <resource-name>=<DNS-name>")
 	}
 	if name == "node" {
-		return fmt.Errorf("domain-certificate resource name %q is reserved for the node certificate", name)
+		return fmt.Errorf("certificate resource name %q is reserved for the node certificate", name)
 	}
 	if _, exists := f[name]; exists {
 		return fmt.Errorf("duplicate certificate resource %q", name)
@@ -64,11 +65,19 @@ func Run(ctx context.Context, args []string) error {
 	var socket, directory string
 	var interval time.Duration
 	certificates := certificateFlags{}
+	workloads := certificateFlags{}
 	var nodeDomains []string
 	flags.StringVar(&socket, "socket", "/var/run/podplane-sds/sds.sock", "Envoy SDS Unix socket")
 	flags.StringVar(&directory, "certificates-dir", "/var/run/podplane/ingress-certificates", "mounted certificate bundle directory")
 	flags.DurationVar(&interval, "poll-interval", defaultPollInterval, "certificate bundle polling interval")
 	flags.Var(certificates, "domain-certificate", "SDS resource name and apex domain (repeatable)")
+	flags.Func("workload-certificate", "SDS resource name and service DNS name: name=service-DNS-name (repeatable; exclusive with ingress modes)", func(value string) error {
+		_, hostname, ok := strings.Cut(value, "=")
+		if !ok || len(validation.IsDNS1123Subdomain(hostname)) != 0 || net.ParseIP(hostname) != nil {
+			return fmt.Errorf("workload-certificate must be <resource-name>=<service-DNS-name>")
+		}
+		return workloads.Set(value)
+	})
 	flags.Func("node-certificate", "comma-separated apex domains served by node.pem as node (exclusive with domain-certificate)", func(value string) error {
 		nodeDomains = strings.Split(value, ",")
 		for _, domain := range nodeDomains {
@@ -84,6 +93,13 @@ func Run(ctx context.Context, args []string) error {
 	if len(certificates) > 0 && len(nodeDomains) > 0 {
 		return fmt.Errorf("domain-certificate and node-certificate are mutually exclusive")
 	}
+	workload := len(workloads) > 0
+	if workload {
+		if len(certificates) > 0 || len(nodeDomains) > 0 {
+			return fmt.Errorf("workload-certificate and ingress certificate modes are mutually exclusive")
+		}
+		certificates = workloads
+	}
 	if len(nodeDomains) > 0 {
 		certificates["node"] = ""
 	}
@@ -91,7 +107,7 @@ func Run(ctx context.Context, args []string) error {
 		return fmt.Errorf("at least one certificate and a positive poll interval are required")
 	}
 	cache := cachev3.NewLinearCache(resourcev3.SecretType)
-	hashes, resources, err := load(directory, certificates, nodeDomains)
+	hashes, resources, err := load(directory, certificates, nodeDomains, workload)
 	if err != nil {
 		return fmt.Errorf("load initial SDS resources: %w", err)
 	}
@@ -104,7 +120,7 @@ func Run(ctx context.Context, args []string) error {
 	grpcServer := grpc.NewServer()
 	callbacks := requestCallbacks(certificates)
 	secretv3.RegisterSecretDiscoveryServiceServer(grpcServer, serverv3.NewServer(ctx, cache, callbacks))
-	go poll(ctx, interval, directory, certificates, nodeDomains, cache, hashes)
+	go poll(ctx, interval, directory, certificates, nodeDomains, workload, cache, hashes)
 	go func() {
 		<-ctx.Done()
 		stopped := make(chan struct{})
@@ -178,7 +194,7 @@ func listen(path string) (net.Listener, error) {
 }
 
 // load validates all configured files and constructs one complete resource generation.
-func load(directory string, certificates certificateFlags, nodeDomains []string) (map[string][sha256.Size]byte, map[string]cachetypes.Resource, error) {
+func load(directory string, certificates certificateFlags, nodeDomains []string, workload bool) (map[string][sha256.Size]byte, map[string]cachetypes.Resource, error) {
 	hashes := make(map[string][sha256.Size]byte, len(certificates))
 	resources := make(map[string]cachetypes.Resource, len(certificates))
 	for name, domain := range certificates {
@@ -191,7 +207,9 @@ func load(directory string, certificates certificateFlags, nodeDomains []string)
 			return nil, nil, fmt.Errorf("read resource %q: %w", name, err)
 		}
 		var chain, key []byte
-		if len(nodeDomains) > 0 {
+		if workload {
+			chain, key, err = validateWorkloadBundle(value, domain, time.Now())
+		} else if len(nodeDomains) > 0 {
 			chain, key, err = ingresspki.ValidateNodeBundle(value, nodeDomains, time.Now())
 		} else {
 			chain, key, err = ingresspki.ValidateBundle(value, domain, time.Now())
@@ -211,7 +229,7 @@ func inline(value []byte) *corev3.DataSource {
 }
 
 // poll publishes each valid resource independently and retains failed resources.
-func poll(ctx context.Context, interval time.Duration, directory string, certificates certificateFlags, nodeDomains []string, cache *cachev3.LinearCache, current map[string][sha256.Size]byte) {
+func poll(ctx context.Context, interval time.Duration, directory string, certificates certificateFlags, nodeDomains []string, workload bool, cache *cachev3.LinearCache, current map[string][sha256.Size]byte) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -222,7 +240,7 @@ func poll(ctx context.Context, interval time.Duration, directory string, certifi
 			for name, domain := range certificates {
 				// A node bundle remains one resource validated against every node
 				// domain; per-domain resources have independent update boundaries.
-				hashes, resources, err := load(directory, certificateFlags{name: domain}, nodeDomains)
+				hashes, resources, err := load(directory, certificateFlags{name: domain}, nodeDomains, workload)
 				if err != nil {
 					slog.Warn("retaining last-known-good SDS resource", "resource", name, "error", err)
 					continue

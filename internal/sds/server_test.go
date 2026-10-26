@@ -56,7 +56,7 @@ func TestLoadBuildsValidatedTLSResources(t *testing.T) {
 	directory := t.TempDir()
 	writeBundle(t, directory, "bundle-example", certificateBundle(t, "example.com", 1))
 
-	hashes, resources, err := load(directory, certificateFlags{"bundle-example": "example.com"}, nil)
+	hashes, resources, err := load(directory, certificateFlags{"bundle-example": "example.com"}, nil, false)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestLoadBuildsValidatedTLSResources(t *testing.T) {
 func TestLoadRejectsWrongDomain(t *testing.T) {
 	directory := t.TempDir()
 	writeBundle(t, directory, "bundle-example", certificateBundle(t, "example.com", 1))
-	if _, _, err := load(directory, certificateFlags{"bundle-example": "example.net"}, nil); err == nil {
+	if _, _, err := load(directory, certificateFlags{"bundle-example": "example.net"}, nil, false); err == nil {
 		t.Fatal("load accepted a certificate for another domain")
 	}
 }
@@ -86,7 +86,7 @@ func TestPollPublishesValidRotation(t *testing.T) {
 	second := certificateBundle(t, "example.com", 2)
 	writeBundle(t, directory, name, first)
 	flags := certificateFlags{name: "example.com"}
-	hashes, resources, err := load(directory, flags, nil)
+	hashes, resources, err := load(directory, flags, nil, false)
 	if err != nil {
 		t.Fatalf("load initial bundle: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestPollPublishesValidRotation(t *testing.T) {
 	initialKey := resourceKey(t, cache, name)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go poll(ctx, 5*time.Millisecond, directory, flags, nil, cache, hashes)
+	go poll(ctx, 5*time.Millisecond, directory, flags, nil, false, cache, hashes)
 	writeBundle(t, directory, name, second)
 
 	waitFor(t, func() bool { return !bytes.Equal(resourceKey(t, cache, name), initialKey) })
@@ -107,7 +107,7 @@ func TestPollRetainsLastGoodRotation(t *testing.T) {
 	name := "bundle-example"
 	writeBundle(t, directory, name, certificateBundle(t, "example.com", 1))
 	flags := certificateFlags{name: "example.com"}
-	hashes, resources, err := load(directory, flags, nil)
+	hashes, resources, err := load(directory, flags, nil, false)
 	if err != nil {
 		t.Fatalf("load initial bundle: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestPollRetainsLastGoodRotation(t *testing.T) {
 	initialKey := resourceKey(t, cache, name)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go poll(ctx, 5*time.Millisecond, directory, flags, nil, cache, hashes)
+	go poll(ctx, 5*time.Millisecond, directory, flags, nil, false, cache, hashes)
 
 	writeBundle(t, directory, name, []byte("not PEM"))
 	time.Sleep(25 * time.Millisecond)
@@ -145,7 +145,7 @@ func TestPollIsolatesDomainFailures(t *testing.T) {
 			flags := certificateFlags{"one": "example.com", "two": "example.net"}
 			writeBundle(t, directory, "one", certificateBundle(t, "example.com", 1))
 			writeBundle(t, directory, "two", certificateBundle(t, "example.net", 1))
-			hashes, resources, err := load(directory, flags, nil)
+			hashes, resources, err := load(directory, flags, nil, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -163,12 +163,12 @@ func TestPollIsolatesDomainFailures(t *testing.T) {
 				writeBundle(t, directory, "two", certificateBundle(t, "example.org", 2))
 			}
 			// The same mixed generation must still fail closed at startup.
-			if _, _, err := load(directory, flags, nil); err == nil {
+			if _, _, err := load(directory, flags, nil, false); err == nil {
 				t.Fatal("initial load accepted invalid configured resource")
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
-			go func() { defer close(done); poll(ctx, 5*time.Millisecond, directory, flags, nil, cache, hashes) }()
+			go func() { defer close(done); poll(ctx, 5*time.Millisecond, directory, flags, nil, false, cache, hashes) }()
 			t.Cleanup(func() { cancel(); <-done })
 			writeBundle(t, directory, "one", certificateBundle(t, "example.com", 2))
 			waitFor(t, func() bool { return !bytes.Equal(resourceKey(t, cache, "one"), first) })

@@ -15,7 +15,7 @@ The Podplane Operator provides features which improve the PaaS developer experie
 - **Ingress certificates:** self-signed fallback and optional ACME DNS-01 issuance
   and renewal, with certificate bundles stored in external secrets providers.
 - **Envoy SDS:** certificate delivery and live reload for secrets-backed
-  per-domain or node-local ingress certificates.
+  per-domain or node-local ingress certificates and projected workload certificates.
 
 ## Configuration
 
@@ -132,17 +132,45 @@ certificates.
 
 - **NLB ingress:** repeat `--domain-certificate=<resource>=<domain>` for each bundle.
 - **Tunnel ingress:** use `--node-certificate=<domain>,<domain>,...` for the domains
-  covered by the node's shared `node.pem` bundle. Do not combine the two modes.
+  covered by the node's shared `node.pem` bundle.
+- **Workload certificates:** repeat
+  `--workload-certificate=<resource>=<service-DNS-name>` for each projected
+  `podCertificate` bundle. The service name must be a lowercase DNS name, not an
+  IP address or wildcard. Do not combine workload, domain, and node modes.
 
-Domain bundles use their resource name as the filename; `node` is reserved.
+Domain and workload bundles use their SDS resource name as the filename under
+`--certificates-dir`; no suffix is added. Names must be single path components
+(not `.` or `..`), must be unique, and `node` is reserved.
 
 ```console
 podplane-operator sds --node-certificate=example.com,example.net
+
+podplane-operator sds \
+  --certificates-dir=/var/run/podplane/workload-certificates \
+  --workload-certificate=agent-router.pem=agent-router.podplane.svc
 ```
+
+For the workload example, mount a projected `podCertificate` volume at
+`/var/run/podplane/workload-certificates` with
+`credentialBundlePath: agent-router.pem`. This single PEM file must contain one
+private key and a leaf-first certificate chain; the key may precede or follow
+the chain. SDS reads the file once per load so projected symlink-generation
+rotation cannot mix keys and certificates from separate reads. Workload
+validation checks the matched keypair, certificate validity periods, a non-CA
+leaf, permission for TLS server authentication, the configured service hostname,
+and signatures between supplied chain certificates. It does not require ingress
+apex/wildcard SANs or restrict additional SANs. Client-side trust verification
+still requires the appropriate CA bundle; SDS does not select trust roots.
 
 SDS checks that certificates are valid and cover the configured domains. Missing
 or invalid bundles prevent startup; invalid later updates leave the last valid
-certificate in use.
+certificate in use, and a subsequent valid generation is published automatically.
+Updates are independent per resource. `--poll-interval` defaults to `5s` and must
+be positive. The socket defaults to `/var/run/podplane-sds/sds.sock`; the default
+certificate directory remains `/var/run/podplane/ingress-certificates`.
+SDS reads mounted files only: it does not fetch Kubernetes Secrets or access the
+Kubernetes API. Metadata-only SDS reference Secrets, if needed by the Envoy
+integration, are separate from these credential files.
 
 ## Helm Chart
 
